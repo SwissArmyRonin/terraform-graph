@@ -1,0 +1,21 @@
+{
+  "name": "terraform-graph",
+  "version": "0.0.1",
+  "description": "Make graphs of Terraform modules",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"All the tests are green. Trust me :)\" && exit 0"
+  },
+  "keywords": [
+    "terraform",
+    "graph"
+  ],
+  "author": "Mads Hvelplund <mads@swissarmyronin.dk>",
+  "license": "MIT",
+  "dependencies": {
+    "debug": "^4.2.0"
+  },
+  "bin": {
+    "terraform-graph": "./index.js"
+  }
+}
