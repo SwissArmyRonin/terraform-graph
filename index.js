@@ -101,11 +101,11 @@ function printGml(vertices) {
     console.log("  hierarchic 1")
     console.log("  directed 1")
     for (const [key, value] of Object.entries(vertices)) {
-        // console.log(`${value.id} ${value.key}`)
+        parent = key.substring(0, key.lastIndexOf('.'))
         console.log(`  node [
     id ${value.id}
     label "${value.key}
-${key}"
+${parent}"
   ]`)
         value.dependencies.forEach((dependency, key, set) => {
             try {
