@@ -7,6 +7,7 @@ const path = require('path');
 const debug = require('debug')("DEBUG");
 const program = require("commander");
 const package_json = require("./package.json");
+const { exit } = require('process');
 
 // Get a list of files with the ".tf" file-ending
 function getTfFiles(dir) {
@@ -153,14 +154,12 @@ program
         ".terraform/modules"
     )
     .option(
-        "-d, --parent-depends-on-child",
-        `add dependencies from parents to their children`,
-        true
+        "--no-parent-depends-on-child",
+        `don't add dependencies from parents to their children`
     )
     .option(
-        "-g, --parent-is-group",
-        `make parents a group containing their children`,
-        false
+        "--parent-is-group",
+        `make parents a group containing their children (only works for GML output)`
     )
     .option(
         "-f, --output-format <format>",
@@ -171,8 +170,8 @@ program
 program.parse(process.argv);
 
 const tfModulePath = program.tfModulePath
-const addDepFromParent = program.parentDependsOnChild;
-const parentIsGroup = program.parentIsGroup;
+const addDepFromParent = !!program.parentDependsOnChild;
+const parentIsGroup = !!program.parentIsGroup;
 // const useTgf = false;
 // const useGml = true;
 const filterNames = [
@@ -180,26 +179,26 @@ const filterNames = [
     /^tagging$/
 ];
 
-// Load the current modules.json file into memory
+let id = 0
+let modules;
+const vertices = {}
 
-// Start scanning for modules, modifying the edge list and vertex list along the way
 try {
+    // Load the current modules.json file into memory
     const modulesJson = JSON.parse(fs.readFileSync(`${tfModulePath}/modules.json`))
 
-    const modules = modulesJson.Modules
+    modules = modulesJson.Modules
         .reduce((map, obj) => {
             map[obj.Key] = { dir: obj.Dir, source: obj.Source }
             return map
         }, {})
 
-    let id = 0
-    const vertices = {}
-
+    // Start scanning for modules, modifying the edge list and vertex list along the way
     scan(".")
 
     if (program.outputFormat == "tgf") {
         printTgf(vertices);
-    } if (program.outputFormat == "gml") {
+    } else if (program.outputFormat == "gml") {
         printGml(vertices);
     } else {
         console.log(vertices);
