@@ -1,0 +1,18 @@
+repos:
+  - repo: git://github.com/pre-commit/pre-commit-hooks
+    rev: v3.3.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-executables-have-shebangs
+  - repo: https://github.com/pre-commit/mirrors-fixmyjs
+    rev: v2.0.0
+    hooks:
+      - id: fixmyjs
+  # - repo: https://github.com/pre-commit/mirrors-jshint
+  #   rev: v2.12.0
+  #   hooks:
+  #     - id: jshint

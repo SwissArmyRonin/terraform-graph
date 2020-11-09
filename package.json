@@ -1,7 +1,7 @@
 {
   "name": "@swissarmyronin/terraform-graph",
   "version": "1.1.1",
-  "description": "Make graphs of Terraform modules",
+  "description": "Make graphs of Terraform modules.",
   "main": "index.js",
   "scripts": {
     "test": "echo \"All the tests are green. Trust me :)\" && exit 0"
@@ -13,6 +13,7 @@
   "author": "Mads Hvelplund <mads@swissarmyronin.dk>",
   "license": "MIT",
   "dependencies": {
+    "commander": "^6.2.0",
     "debug": "^4.2.0"
   },
   "bin": {
