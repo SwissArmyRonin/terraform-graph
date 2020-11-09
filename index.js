@@ -57,6 +57,10 @@ function scan(root, prefix) {
 
     for (const [path, value] of Object.entries(matches)) {
         vertices[path] = value;
+
+        parent = path.substring(0, path.lastIndexOf('.'))
+        if (parent.length > 0) vertices[parent].dependencies.add(path)
+
         debug(`Scanning "${path} in "${root}"`)
         let cache
 
@@ -66,9 +70,27 @@ function scan(root, prefix) {
             debug(`ERROR: Can't look up "${path}": ${err.message}. Skipping.`)
             continue;
         }
-        // vertices[path] = index++
+
         scan(cache, `${path}.`)
     }
+}
+
+function printTgf(vertices) {
+    const edges = []
+    const errors = []
+    for (const [_, value] of Object.entries(vertices)) {
+        console.log(`${value.id} ${value.key}`)
+        value.dependencies.forEach((dependency, key, set) => {
+            try {
+                edges.push(`${value.id} ${vertices[dependency].id}`)
+            } catch (err) {
+                errors.push(`ERROR: Can't find "${dependency}"`);
+            }
+        })
+    }
+    console.log("#")
+    edges.forEach(e => console.log(e))
+    errors.forEach(e => debug(e))
 }
 
 
@@ -83,23 +105,9 @@ const modules = modulesJson.Modules
     }, {})
 
 let id = 0
-const edges = []
 const vertices = {}
-const errors = []
 
 // Start scanning for modules, modifying the edge list and vertex list along the way
 scan(".")
 
-for (const [_, value] of Object.entries(vertices)) {
-    console.log(`${value.id} ${value.key}`)
-    value.dependencies.forEach((dependency, key, set) => {
-        try {
-            edges.push(`${value.id} ${vertices[dependency].id}`)
-        } catch (err) {
-            errors.push(`ERROR: Can't find "${dependency}"`);
-        }
-    })
-}
-console.log("#")
-edges.forEach(e => console.log(e))
-errors.forEach(e => debug(e))
+printTgf(vertices)
