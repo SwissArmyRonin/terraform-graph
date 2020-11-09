@@ -149,9 +149,13 @@ program.version(package_json.version).description(package_json.description);
 
 program
     .option(
-        "-p, --tf-module-path <path>",
+        "--tf-module-path <path>",
         `the path where "terraform init" has downloaded the module cache`,
         ".terraform/modules"
+    )
+    .option(
+        "--no-filter-naming-and-tagging",
+        `don't filter out usage of the naming and tagging modules`
     )
     .option(
         "--no-parent-depends-on-child",
@@ -162,7 +166,7 @@ program
         `make parents a group containing their children (only works for GML output)`
     )
     .option(
-        "-f, --output-format <format>",
+        "--output-format <format>",
         `The output format (gml|tgf)`,
         "gml"
     );
@@ -172,12 +176,10 @@ program.parse(process.argv);
 const tfModulePath = program.tfModulePath
 const addDepFromParent = !!program.parentDependsOnChild;
 const parentIsGroup = !!program.parentIsGroup;
-// const useTgf = false;
-// const useGml = true;
-const filterNames = [
+const filterNames = !!program.filterNamingAndTagging ? [
     /^naming$/,
     /^tagging$/
-];
+] : [];
 
 let id = 0
 let modules;
