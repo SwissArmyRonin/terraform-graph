@@ -78,8 +78,9 @@ function scan(root, prefix) {
 function printTgf(vertices) {
     const edges = []
     const errors = []
-    for (const [_, value] of Object.entries(vertices)) {
+    for (const [key, value] of Object.entries(vertices)) {
         console.log(`${value.id} ${value.key}`)
+
         value.dependencies.forEach((dependency, key, set) => {
             try {
                 edges.push(`${value.id} ${vertices[dependency].id}`)
@@ -93,6 +94,34 @@ function printTgf(vertices) {
     errors.forEach(e => debug(e))
 }
 
+function printGml(vertices) {
+    const edges = []
+    const errors = []
+    console.log("graph [")
+    console.log("  hierarchic 1")
+    console.log("  directed 1")
+    for (const [key, value] of Object.entries(vertices)) {
+        // console.log(`${value.id} ${value.key}`)
+        console.log(`  node [
+    id ${value.id}
+    label "${value.key}
+${key}"
+  ]`)
+        value.dependencies.forEach((dependency, key, set) => {
+            try {
+                edges.push(`  edge [
+    source ${value.id}
+    target ${vertices[dependency].id}
+  ]`)
+            } catch (err) {
+                errors.push(`ERROR: Can't find "${dependency}"`);
+            }
+        })
+    }
+    edges.forEach(e => console.log(e))
+    console.log("]")
+    errors.forEach(e => debug(e))
+}
 
 
 // Load the current modules.json file into memory
@@ -110,4 +139,5 @@ const vertices = {}
 // Start scanning for modules, modifying the edge list and vertex list along the way
 scan(".")
 
-printTgf(vertices)
+// printTgf(vertices)
+printGml(vertices)
