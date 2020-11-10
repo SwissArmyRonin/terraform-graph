@@ -6,6 +6,10 @@
   "scripts": {
     "test": "echo \"All the tests are green. Trust me :)\" && exit 0"
   },
+  "bugs": {
+    "url": "https://github.com/SwissArmyRonin/terraform-graph/issues"
+  },
+  "homepage": "https://github.com/SwissArmyRonin/terraform-graph#readme",
   "keywords": [
     "terraform",
     "graph"
@@ -15,6 +19,13 @@
   "dependencies": {
     "commander": "^6.2.0",
     "debug": "^4.2.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SwissArmyRonin/terraform-graph.git"
   },
   "bin": {
     "terraform-graph": "./index.js"
