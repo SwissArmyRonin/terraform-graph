@@ -1,18 +1,35 @@
-#!/usr/bin/env node
-
 // TODO: strip comments from TF files
 
 const fs = require('fs');
-const path = require('path');
+import path from 'path';
 const debug = require('debug')("DEBUG");
-const program = require("commander");
-const package_json = require("./package.json");
-const { exit } = require('process');
+import program from "commander";
+const package_json = require("../package.json");
+// import { exit } from 'process';
+
+interface ModuleMatch {
+    source: string;
+    module: string;
+    body: string;
+}
+
+interface ModuleNode {
+    id: number;
+    key: string;
+    dependencies: Set<string>;
+    isGroup?: boolean
+    groupId?: number
+}
+
+interface SourceMapping {
+    dir: string;
+    source: String;
+}
 
 // Get a list of files with the ".tf" file-ending
-function getTfFiles(dir) {
+function getTfFiles(dir: string): string[] {
     const regex = /\.tf$/;
-    return fs.readdirSync(dir)
+    return (fs.readdirSync(dir) as string[])
         .map(f => path.join(dir, f))
         .filter(f => regex.test(f))
         .filter(f => {
@@ -25,13 +42,13 @@ function getTfFiles(dir) {
         });
 }
 
-function scan(root, prefix) {
+function scan(root: string, prefix?: string) {
     prefix = prefix || "";
 
     const matches = getTfFiles(root)
         .map(file => fs.readFileSync(file, { encoding: 'utf8', flag: 'r' }))
         .map(res => Array.from(
-            res.matchAll(/module "([-\w]+)"\s+{(.*?(?=\n}))/sg), match => {
+            res.matchAll(/module "([-\w]+)"\s+{(.*?(?=\n}))/sg), (match: string[]) => {
                 return {
                     source: res.file,
                     module: match[1],
@@ -40,19 +57,18 @@ function scan(root, prefix) {
             }
         ))
         .flat()
-        .reduce((map, obj) => {
-            map[`${prefix}${obj.module}`] = {
+        .reduce((map: Map<string, ModuleNode>, obj: ModuleMatch) => {
+            map.set(`${prefix}${obj.module}`, {
                 id: id += 1,
                 key: obj.module,
                 dependencies: new Set(Array.from(obj.body.matchAll(/module\.([-\w]+)\.([-\w]+)/g), m => prefix + m[1])),
-                //edges: Array.from(obj.body.matchAll(/module\.([-\w]+)\.([-\w]+)/g), m => { return { target: m[1], label: m[2] } })
-            }
+            })
             return map
-        }, {});
+        }, new Map());
 
-    for (const [path, value] of Object.entries(matches)) {
+    for (let [path, value] of matches) {
         let skip = false;
-        for (i = 0; i < filterNames.length; i += 1) {
+        for (let i = 0; i < filterNames.length; i += 1) {
             if (value.key.match(filterNames[i])) {
                 skip = true;
                 break;
@@ -63,24 +79,25 @@ function scan(root, prefix) {
             continue;
         }
 
-        vertices[path] = value;
+        vertices.set(path, value);
 
-        parent = path.substring(0, path.lastIndexOf('.'))
+        const parent = path.substring(0, path.lastIndexOf('.'))
+        const pNode = vertices.get(parent)!;
         if (parent.length > 0) {
             if (addDepFromParent) {
-                vertices[parent].dependencies.add(path);
+                pNode.dependencies.add(path);
             }
             if (parentIsGroup) {
-                vertices[parent].isGroup = true;
-                vertices[path].groupId = vertices[parent].id;
+                pNode.isGroup = true;
+                vertices.get(path)!.groupId = pNode.id;
             }
         }
 
         debug(`Scanning "${path} in "${root}"`);
-        let cache;
+        let cache: string;
 
         try {
-            cache = modules[path].dir;
+            cache = modules.get(path)!.dir;
         } catch (err) {
             debug(`ERROR: Can't look up "${path}": ${err.message}. Skipping.`);
             continue;
@@ -90,15 +107,15 @@ function scan(root, prefix) {
     }
 }
 
-function printTgf(vertices) {
-    const edges = []
-    const errors = []
-    for (const [key, value] of Object.entries(vertices)) {
+function printTgf(vertices: Map<string, ModuleNode>) {
+    const edges: string[] = []
+    const errors: string[] = []
+    for (const [_, value] of vertices) {
         console.log(`${value.id} ${value.key}`)
 
         value.dependencies.forEach((dependency, key, set) => {
             try {
-                edges.push(`${value.id} ${vertices[dependency].id}`)
+                edges.push(`${value.id} ${vertices.get(dependency)!.id}`)
             } catch (err) {
                 errors.push(`ERROR: Can't find "${dependency}"`);
             }
@@ -109,14 +126,13 @@ function printTgf(vertices) {
     errors.forEach(e => debug(e))
 }
 
-function printGml(vertices) {
-    const edges = []
-    const errors = []
+function printGml(vertices: Map<string, ModuleNode>) {
+    const edges: string[] = []
+    const errors: string[] = []
     console.log("graph [")
     console.log("  hierarchic 1")
     console.log("  directed 1")
-    for (const [key, value] of Object.entries(vertices)) {
-        parent = key.substring(0, key.lastIndexOf('.'))
+    for (const [_, value] of vertices) {
         console.log(`  node [
     id ${value.id}
     label "${value.key}"`);
@@ -127,11 +143,11 @@ function printGml(vertices) {
             console.log("    isGroup 1")
         }
         console.log("  ]")
-        value.dependencies.forEach((dependency, key, set) => {
+        value.dependencies.forEach((dependency, _, __) => {
             try {
                 edges.push(`  edge [
     source ${value.id}
-    target ${vertices[dependency].id}
+    target ${vertices.get(dependency)!.id}
   ]`)
             } catch (err) {
                 errors.push(`ERROR: Can't find "${dependency}"`);
@@ -182,18 +198,18 @@ const filterNames = !!program.filterNamingAndTagging ? [
 ] : [];
 
 let id = 0
-let modules;
-const vertices = {}
+let modules = new Map<string, SourceMapping>();
+const vertices = new Map<string, ModuleNode>();
 
 try {
     // Load the current modules.json file into memory
     const modulesJson = JSON.parse(fs.readFileSync(`${tfModulePath}/modules.json`))
 
     modules = modulesJson.Modules
-        .reduce((map, obj) => {
-            map[obj.Key] = { dir: obj.Dir, source: obj.Source }
+        .reduce((map: Map<string, SourceMapping>, obj: { Key: string, Dir: string, Source: string }) => {
+            map.set(obj.Key, { dir: obj.Dir, source: obj.Source })
             return map
-        }, {})
+        }, new Map())
 
     // Start scanning for modules, modifying the edge list and vertex list along the way
     scan(".")
