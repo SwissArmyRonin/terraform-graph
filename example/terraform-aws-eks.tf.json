@@ -1,0 +1,1477 @@
+{
+  "data": {
+    "aws_ami": {
+      "eks_worker": {
+        "count": "${local.worker_has_linux_ami ? 1 : 0}",
+        "filter": {
+          "name": "name",
+          "values": [
+            "${local.worker_ami_name_filter}"
+          ]
+        },
+        "most_recent": true,
+        "owners": [
+          "${var.worker_ami_owner_id}"
+        ]
+      },
+      "eks_worker_windows": {
+        "count": "${local.worker_has_windows_ami ? 1 : 0}",
+        "filter": [
+          {
+            "name": "name",
+            "values": [
+              "${local.worker_ami_name_filter_windows}"
+            ]
+          },
+          {
+            "name": "platform",
+            "values": [
+              "windows"
+            ]
+          }
+        ],
+        "most_recent": true,
+        "owners": [
+          "${var.worker_ami_owner_id_windows}"
+        ]
+      }
+    },
+    "aws_caller_identity": {
+      "current": {}
+    },
+    "aws_iam_instance_profile": {
+      "custom_worker_group_iam_instance_profile": {
+        "count": "${var.manage_worker_iam_resources ? 0 : local.worker_group_count}",
+        "name": "${lookup(\n    var.worker_groups[count.index],\n    \"iam_instance_profile_name\",\n    local.workers_group_defaults[\"iam_instance_profile_name\"],\n  )}"
+      },
+      "custom_worker_group_launch_template_iam_instance_profile": {
+        "count": "${var.manage_worker_iam_resources ? 0 : local.worker_group_launch_template_count}",
+        "name": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"iam_instance_profile_name\",\n    local.workers_group_defaults[\"iam_instance_profile_name\"],\n  )}"
+      }
+    },
+    "aws_iam_policy_document": {
+      "cluster_assume_role_policy": {
+        "statement": {
+          "actions": [
+            "sts:AssumeRole"
+          ],
+          "principals": {
+            "identifiers": [
+              "eks.amazonaws.com"
+            ],
+            "type": "Service"
+          },
+          "sid": "EKSClusterAssumeRole"
+        }
+      },
+      "cluster_elb_sl_role_creation": {
+        "count": "${var.manage_cluster_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "statement": {
+          "actions": [
+            "ec2:DescribeAccountAttributes",
+            "ec2:DescribeInternetGateways",
+            "ec2:DescribeAddresses"
+          ],
+          "effect": "Allow",
+          "resources": [
+            "*"
+          ]
+        }
+      },
+      "workers_assume_role_policy": {
+        "statement": {
+          "actions": [
+            "sts:AssumeRole"
+          ],
+          "principals": {
+            "identifiers": [
+              "${local.ec2_principal}"
+            ],
+            "type": "Service"
+          },
+          "sid": "EKSWorkerAssumeRole"
+        }
+      }
+    },
+    "aws_iam_role": {
+      "custom_cluster_iam_role": {
+        "count": "${var.manage_cluster_iam_resources ? 0 : 1}",
+        "name": "${var.cluster_iam_role_name}"
+      }
+    },
+    "aws_partition": {
+      "current": {}
+    },
+    "http": {
+      "wait_for_cluster": {
+        "ca_certificate": "${base64decode(coalescelist(aws_eks_cluster.this[*].certificate_authority[0].data, [\"\"])[0])}",
+        "count": "${var.create_eks \u0026\u0026 var.manage_aws_auth ? 1 : 0}",
+        "depends_on": [
+          "${aws_eks_cluster.this}",
+          "${aws_security_group_rule.cluster_private_access_sg_source}",
+          "${aws_security_group_rule.cluster_private_access_cidrs_source}"
+        ],
+        "timeout": "${var.wait_for_cluster_timeout}",
+        "url": "${format(\"%s/healthz\", aws_eks_cluster.this[0].endpoint)}"
+      }
+    }
+  },
+  "locals": [
+    {
+      "auth_launch_template_worker_roles": "${[\n    for index in range(0, var.create_eks ? local.worker_group_launch_template_count : 0) : {\n      worker_role_arn = \"arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/${element(\n        coalescelist(\n          aws_iam_instance_profile.workers_launch_template.*.role,\n          data.aws_iam_instance_profile.custom_worker_group_launch_template_iam_instance_profile.*.role_name,\n          [\"\"]\n        ),\n        index\n      )}\"\n      platform = lookup(\n        var.worker_groups_launch_template[index],\n        \"platform\",\n        local.workers_group_defaults[\"platform\"]\n      )\n    }\n  ]}",
+      "auth_worker_roles": "${[\n    for index in range(0, var.create_eks ? local.worker_group_count : 0) : {\n      worker_role_arn = \"arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/${element(\n        coalescelist(\n          aws_iam_instance_profile.workers.*.role,\n          data.aws_iam_instance_profile.custom_worker_group_iam_instance_profile.*.role_name,\n          [\"\"]\n        ),\n        index,\n      )}\"\n      platform = lookup(\n        var.worker_groups[index],\n        \"platform\",\n        local.workers_group_defaults[\"platform\"]\n      )\n    }\n  ]}",
+      "configmap_roles": "${[\n    for role in concat(\n      local.auth_launch_template_worker_roles,\n      local.auth_worker_roles,\n      module.node_groups.aws_auth_roles,\n      module.fargate.aws_auth_roles,\n    ) :\n    {\n      # Work around https://github.com/kubernetes-sigs/aws-iam-authenticator/issues/153\n      # Strip the leading slash off so that Terraform doesn't think it's a regex\n      rolearn  = replace(role[\"worker_role_arn\"], replace(var.iam_path, \"/^//\", \"\"), \"\")\n      username = role[\"platform\"] == \"fargate\" ? \"system:node:{{SessionName}}\" : \"system:node:{{EC2PrivateDNSName}}\"\n      groups = tolist(concat(\n        [\n          \"system:bootstrappers\",\n          \"system:nodes\",\n        ],\n        role[\"platform\"] == \"windows\" ? [\"eks:kube-proxy-windows\"] : [],\n        role[\"platform\"] == \"fargate\" ? [\"system:node-proxier\"] : [],\n      ))\n    }\n  ]}"
+    },
+    {
+      "cluster_iam_role_arn": "${var.manage_cluster_iam_resources ? join(\"\", aws_iam_role.cluster.*.arn) : join(\"\", data.aws_iam_role.custom_cluster_iam_role.*.arn)}",
+      "cluster_iam_role_name": "${var.manage_cluster_iam_resources ? join(\"\", aws_iam_role.cluster.*.name) : var.cluster_iam_role_name}",
+      "cluster_primary_security_group_id": "${var.cluster_version \u003e= 1.14 ? element(concat(aws_eks_cluster.this[*].vpc_config[0].cluster_security_group_id, [\"\"]), 0) : null}",
+      "cluster_security_group_id": "${var.cluster_create_security_group ? join(\"\", aws_security_group.cluster.*.id) : var.cluster_security_group_id}",
+      "default_ami_id_linux": "${local.workers_group_defaults.ami_id != \"\" ? local.workers_group_defaults.ami_id : concat(data.aws_ami.eks_worker.*.id, [\"\"])[0]}",
+      "default_ami_id_windows": "${local.workers_group_defaults.ami_id_windows != \"\" ? local.workers_group_defaults.ami_id_windows : concat(data.aws_ami.eks_worker_windows.*.id, [\"\"])[0]}",
+      "default_iam_role_id": "${concat(aws_iam_role.workers.*.id, [\"\"])[0]}",
+      "default_platform": "linux",
+      "ebs_optimized_not_supported": [
+        "c1.medium",
+        "c3.8xlarge",
+        "c3.large",
+        "c5d.12xlarge",
+        "c5d.24xlarge",
+        "c5d.metal",
+        "cc2.8xlarge",
+        "cr1.8xlarge",
+        "g2.8xlarge",
+        "g4dn.metal",
+        "hs1.8xlarge",
+        "i2.8xlarge",
+        "m1.medium",
+        "m1.small",
+        "m2.xlarge",
+        "m3.large",
+        "m3.medium",
+        "m5ad.16xlarge",
+        "m5ad.8xlarge",
+        "m5dn.metal",
+        "m5n.metal",
+        "r3.8xlarge",
+        "r3.large",
+        "r5ad.16xlarge",
+        "r5ad.8xlarge",
+        "r5dn.metal",
+        "r5n.metal",
+        "t1.micro",
+        "t2.2xlarge",
+        "t2.large",
+        "t2.medium",
+        "t2.micro",
+        "t2.nano",
+        "t2.small",
+        "t2.xlarge"
+      ],
+      "ec2_principal": "ec2.${data.aws_partition.current.dns_suffix}",
+      "kubeconfig": "${var.create_eks ? templatefile(\"${path.module}/templates/kubeconfig.tpl\", {\n    kubeconfig_name                   = local.kubeconfig_name\n    endpoint                          = coalescelist(aws_eks_cluster.this[*].endpoint, [\"\"])[0]\n    cluster_auth_base64               = coalescelist(aws_eks_cluster.this[*].certificate_authority[0].data, [\"\"])[0]\n    aws_authenticator_command         = var.kubeconfig_aws_authenticator_command\n    aws_authenticator_command_args    = length(var.kubeconfig_aws_authenticator_command_args) \u003e 0 ? var.kubeconfig_aws_authenticator_command_args : [\"token\", \"-i\", coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]]\n    aws_authenticator_additional_args = var.kubeconfig_aws_authenticator_additional_args\n    aws_authenticator_env_variables   = var.kubeconfig_aws_authenticator_env_variables\n  }) : \"\"}",
+      "kubeconfig_name": "${var.kubeconfig_name == \"\" ? \"eks_${var.cluster_name}\" : var.kubeconfig_name}",
+      "launch_template_userdata_rendered": "${[\n    for index in range(var.create_eks ? local.worker_group_launch_template_count : 0) : templatefile(\n      lookup(\n        var.worker_groups_launch_template[index],\n        \"userdata_template_file\",\n        lookup(var.worker_groups_launch_template[index], \"platform\", local.workers_group_defaults[\"platform\"]) == \"windows\"\n        ? \"${path.module}/templates/userdata_windows.tpl\"\n        : \"${path.module}/templates/userdata.sh.tpl\"\n      ),\n      merge({\n        platform            = lookup(var.worker_groups_launch_template[index], \"platform\", local.workers_group_defaults[\"platform\"])\n        cluster_name        = coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]\n        endpoint            = coalescelist(aws_eks_cluster.this[*].endpoint, [\"\"])[0]\n        cluster_auth_base64 = coalescelist(aws_eks_cluster.this[*].certificate_authority[0].data, [\"\"])[0]\n        pre_userdata = lookup(\n          var.worker_groups_launch_template[index],\n          \"pre_userdata\",\n          local.workers_group_defaults[\"pre_userdata\"],\n        )\n        additional_userdata = lookup(\n          var.worker_groups_launch_template[index],\n          \"additional_userdata\",\n          local.workers_group_defaults[\"additional_userdata\"],\n        )\n        bootstrap_extra_args = lookup(\n          var.worker_groups_launch_template[index],\n          \"bootstrap_extra_args\",\n          local.workers_group_defaults[\"bootstrap_extra_args\"],\n        )\n        kubelet_extra_args = lookup(\n          var.worker_groups_launch_template[index],\n          \"kubelet_extra_args\",\n          local.workers_group_defaults[\"kubelet_extra_args\"],\n        )\n        },\n        lookup(\n          var.worker_groups_launch_template[index],\n          \"userdata_template_extra_args\",\n          local.workers_group_defaults[\"userdata_template_extra_args\"]\n        )\n      )\n    )\n  ]}",
+      "policy_arn_prefix": "arn:${data.aws_partition.current.partition}:iam::aws:policy",
+      "sts_principal": "sts.${data.aws_partition.current.dns_suffix}",
+      "userdata_rendered": "${[\n    for index in range(var.create_eks ? local.worker_group_count : 0) : templatefile(\n      lookup(\n        var.worker_groups[index],\n        \"userdata_template_file\",\n        lookup(var.worker_groups[index], \"platform\", local.workers_group_defaults[\"platform\"]) == \"windows\"\n        ? \"${path.module}/templates/userdata_windows.tpl\"\n        : \"${path.module}/templates/userdata.sh.tpl\"\n      ),\n      merge({\n        platform            = lookup(var.worker_groups[index], \"platform\", local.workers_group_defaults[\"platform\"])\n        cluster_name        = coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]\n        endpoint            = coalescelist(aws_eks_cluster.this[*].endpoint, [\"\"])[0]\n        cluster_auth_base64 = coalescelist(aws_eks_cluster.this[*].certificate_authority[0].data, [\"\"])[0]\n        pre_userdata = lookup(\n          var.worker_groups[index],\n          \"pre_userdata\",\n          local.workers_group_defaults[\"pre_userdata\"],\n        )\n        additional_userdata = lookup(\n          var.worker_groups[index],\n          \"additional_userdata\",\n          local.workers_group_defaults[\"additional_userdata\"],\n        )\n        bootstrap_extra_args = lookup(\n          var.worker_groups[index],\n          \"bootstrap_extra_args\",\n          local.workers_group_defaults[\"bootstrap_extra_args\"],\n        )\n        kubelet_extra_args = lookup(\n          var.worker_groups[index],\n          \"kubelet_extra_args\",\n          local.workers_group_defaults[\"kubelet_extra_args\"],\n        )\n        },\n        lookup(\n          var.worker_groups[index],\n          \"userdata_template_extra_args\",\n          local.workers_group_defaults[\"userdata_template_extra_args\"]\n        )\n      )\n    )\n  ]}",
+      "worker_ami_name_filter": "${var.worker_ami_name_filter != \"\" ? var.worker_ami_name_filter : \"amazon-eks-node-${var.cluster_version}-v*\"}",
+      "worker_ami_name_filter_windows": "${var.worker_ami_name_filter_windows != \"\" ?\n    var.worker_ami_name_filter_windows : \"Windows_Server-2019-English-Core-EKS_Optimized-${tonumber(var.cluster_version) \u003e= 1.14 ? var.cluster_version : 1.14}-*\"}",
+      "worker_group_count": "${length(var.worker_groups)}",
+      "worker_group_launch_template_count": "${length(var.worker_groups_launch_template)}",
+      "worker_has_linux_ami": "${length([for x in concat(var.worker_groups, var.worker_groups_launch_template) : x if lookup(\n    x,\n    \"platform\",\n    # Fallback on default `platform` if it's not defined in current worker group\n    lookup(\n      merge({ platform = local.default_platform }, var.workers_group_defaults),\n      \"platform\",\n      null\n    )\n  ) == \"linux\"]) \u003e 0}",
+      "worker_has_windows_ami": "${length([for x in concat(var.worker_groups, var.worker_groups_launch_template) : x if lookup(\n    x,\n    \"platform\",\n    # Fallback on default `platform` if it's not defined in current worker group\n    lookup(\n      merge({ platform = local.default_platform }, var.workers_group_defaults),\n      \"platform\",\n      null\n    )\n  ) == \"windows\"]) \u003e 0}",
+      "worker_security_group_id": "${var.worker_create_security_group ? join(\"\", aws_security_group.workers.*.id) : var.worker_security_group_id}",
+      "workers_group_defaults": "${merge(\n    local.workers_group_defaults_defaults,\n    var.workers_group_defaults,\n  )}",
+      "workers_group_defaults_defaults": {
+        "additional_ebs_volumes": null,
+        "additional_instance_store_volumes": null,
+        "additional_security_group_ids": null,
+        "additional_userdata": "",
+        "ami_id": "",
+        "ami_id_windows": "",
+        "asg_desired_capacity": "1",
+        "asg_force_delete": false,
+        "asg_initial_lifecycle_hooks": null,
+        "asg_max_size": "3",
+        "asg_min_size": "1",
+        "bootstrap_extra_args": "",
+        "capacity_rebalance": false,
+        "cpu_credits": "standard",
+        "default_cooldown": null,
+        "ebs_optimized": true,
+        "elastic_inference_accelerator": null,
+        "enable_monitoring": true,
+        "enabled_metrics": null,
+        "enclave_support": false,
+        "eni_delete": true,
+        "health_check_grace_period": null,
+        "health_check_type": null,
+        "iam_instance_profile_name": "",
+        "iam_role_id": "local.default_iam_role_id",
+        "instance_refresh_enabled": false,
+        "instance_refresh_instance_warmup": null,
+        "instance_refresh_min_healthy_percentage": 90,
+        "instance_refresh_strategy": "Rolling",
+        "instance_refresh_triggers": null,
+        "instance_store_virtual_name": "ephemeral0",
+        "instance_type": "m4.large",
+        "key_name": "",
+        "kubelet_extra_args": "",
+        "launch_template_id": null,
+        "launch_template_placement_group": null,
+        "launch_template_placement_tenancy": "default",
+        "launch_template_version": "$Latest",
+        "load_balancers": null,
+        "market_type": null,
+        "max_instance_lifetime": 0,
+        "metadata_http_endpoint": "enabled",
+        "metadata_http_put_response_hop_limit": null,
+        "metadata_http_tokens": "optional",
+        "name": "count.index",
+        "on_demand_allocation_strategy": null,
+        "on_demand_base_capacity": "0",
+        "on_demand_percentage_above_base_capacity": "0",
+        "override_instance_types": [
+          "m5.large",
+          "m5a.large",
+          "m5d.large",
+          "m5ad.large"
+        ],
+        "placement_group": null,
+        "placement_tenancy": "",
+        "platform": "${local.default_platform}",
+        "pre_userdata": "",
+        "protect_from_scale_in": false,
+        "public_ip": false,
+        "root_block_device_name": "${concat(data.aws_ami.eks_worker.*.root_device_name, [\"\"])[0]}",
+        "root_block_device_name_windows": "${concat(data.aws_ami.eks_worker_windows.*.root_device_name, [\"\"])[0]}",
+        "root_encrypted": false,
+        "root_iops": "0",
+        "root_kms_key_id": "",
+        "root_volume_size": "100",
+        "root_volume_throughput": null,
+        "root_volume_type": "gp2",
+        "service_linked_role_arn": "",
+        "spot_allocation_strategy": "lowest-price",
+        "spot_instance_pools": 10,
+        "spot_max_price": "",
+        "spot_price": "",
+        "subnets": "${var.subnets}",
+        "suspended_processes": [
+          "AZRebalance"
+        ],
+        "tags": null,
+        "target_group_arns": null,
+        "termination_policies": null,
+        "update_default_version": false,
+        "userdata_template_extra_args": {},
+        "userdata_template_file": "",
+        "warm_pool": null
+      }
+    }
+  ],
+  "module": {
+    "fargate": {
+      "cluster_name": "${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}",
+      "create_eks": "${var.create_eks}",
+      "create_fargate_pod_execution_role": "${var.create_fargate_pod_execution_role}",
+      "eks_depends_on": [
+        "${aws_eks_cluster.this}",
+        "${kubernetes_config_map.aws_auth}"
+      ],
+      "fargate_pod_execution_role_name": "${var.fargate_pod_execution_role_name}",
+      "fargate_profiles": "${var.fargate_profiles}",
+      "iam_path": "${var.iam_path}",
+      "iam_policy_arn_prefix": "${local.policy_arn_prefix}",
+      "permissions_boundary": "${var.permissions_boundary}",
+      "source": "./modules/fargate",
+      "subnets": "${var.subnets}",
+      "tags": "${var.tags}"
+    },
+    "node_groups": {
+      "cluster_name": "${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}",
+      "create_eks": "${var.create_eks}",
+      "default_iam_role_arn": "${coalescelist(aws_iam_role.workers[*].arn, [\"\"])[0]}",
+      "ng_depends_on": [
+        "${aws_eks_cluster.this}",
+        "${kubernetes_config_map.aws_auth}",
+        "${aws_iam_role_policy_attachment.workers_AmazonEKSWorkerNodePolicy}",
+        "${aws_iam_role_policy_attachment.workers_AmazonEKS_CNI_Policy}",
+        "${aws_iam_role_policy_attachment.workers_AmazonEC2ContainerRegistryReadOnly}"
+      ],
+      "node_groups": "${var.node_groups}",
+      "node_groups_defaults": "${var.node_groups_defaults}",
+      "source": "./modules/node_groups",
+      "tags": "${var.tags}",
+      "worker_additional_security_group_ids": "${var.worker_additional_security_group_ids}",
+      "worker_security_group_id": "${local.worker_security_group_id}",
+      "workers_group_defaults": "${local.workers_group_defaults}"
+    }
+  },
+  "output": {
+    "cloudwatch_log_group_arn": {
+      "description": "Arn of cloudwatch log group created",
+      "value": "${element(concat(aws_cloudwatch_log_group.this[*].arn, [\"\"]), 0)}"
+    },
+    "cloudwatch_log_group_name": {
+      "description": "Name of cloudwatch log group created",
+      "value": "${element(concat(aws_cloudwatch_log_group.this[*].name, [\"\"]), 0)}"
+    },
+    "cluster_arn": {
+      "description": "The Amazon Resource Name (ARN) of the cluster.",
+      "value": "${element(concat(aws_eks_cluster.this.*.arn, [\"\"]), 0)}"
+    },
+    "cluster_certificate_authority_data": {
+      "description": "Nested attribute containing certificate-authority-data for your cluster. This is the base64 encoded certificate data required to communicate with your cluster.",
+      "value": "${element(concat(aws_eks_cluster.this[*].certificate_authority[0].data, [\"\"]), 0)}"
+    },
+    "cluster_endpoint": {
+      "description": "The endpoint for your EKS Kubernetes API.",
+      "value": "${element(concat(aws_eks_cluster.this.*.endpoint, [\"\"]), 0)}"
+    },
+    "cluster_iam_role_arn": {
+      "description": "IAM role ARN of the EKS cluster.",
+      "value": "${local.cluster_iam_role_arn}"
+    },
+    "cluster_iam_role_name": {
+      "description": "IAM role name of the EKS cluster.",
+      "value": "${local.cluster_iam_role_name}"
+    },
+    "cluster_id": {
+      "depends_on": [
+        "${data.http.wait_for_cluster}"
+      ],
+      "description": "The name/id of the EKS cluster. Will block on cluster creation until the cluster is really ready.",
+      "value": "${element(concat(aws_eks_cluster.this.*.id, [\"\"]), 0)}"
+    },
+    "cluster_oidc_issuer_url": {
+      "description": "The URL on the EKS cluster OIDC Issuer",
+      "value": "${flatten(concat(aws_eks_cluster.this[*].identity[*].oidc.0.issuer, [\"\"]))[0]}"
+    },
+    "cluster_primary_security_group_id": {
+      "description": "The cluster primary security group ID created by the EKS cluster on 1.14 or later. Referred to as 'Cluster security group' in the EKS console.",
+      "value": "${local.cluster_primary_security_group_id}"
+    },
+    "cluster_security_group_id": {
+      "description": "Security group ID attached to the EKS cluster. On 1.14 or later, this is the 'Additional security groups' in the EKS console.",
+      "value": "${local.cluster_security_group_id}"
+    },
+    "cluster_version": {
+      "description": "The Kubernetes server version for the EKS cluster.",
+      "value": "${element(concat(aws_eks_cluster.this[*].version, [\"\"]), 0)}"
+    },
+    "config_map_aws_auth": {
+      "description": "A kubernetes configuration to authenticate to this EKS cluster.",
+      "value": "${kubernetes_config_map.aws_auth.*}"
+    },
+    "fargate_iam_role_arn": {
+      "description": "IAM role ARN for EKS Fargate pods",
+      "value": "${module.fargate.iam_role_arn}"
+    },
+    "fargate_iam_role_name": {
+      "description": "IAM role name for EKS Fargate pods",
+      "value": "${module.fargate.iam_role_name}"
+    },
+    "fargate_profile_arns": {
+      "description": "Amazon Resource Name (ARN) of the EKS Fargate Profiles.",
+      "value": "${module.fargate.fargate_profile_arns}"
+    },
+    "fargate_profile_ids": {
+      "description": "EKS Cluster name and EKS Fargate Profile names separated by a colon (:).",
+      "value": "${module.fargate.fargate_profile_ids}"
+    },
+    "kubeconfig": {
+      "depends_on": [
+        "${data.http.wait_for_cluster}"
+      ],
+      "description": "kubectl config file contents for this EKS cluster. Will block on cluster creation until the cluster is really ready.",
+      "value": "${local.kubeconfig}"
+    },
+    "kubeconfig_filename": {
+      "depends_on": [
+        "${data.http.wait_for_cluster}"
+      ],
+      "description": "The filename of the generated kubectl config. Will block on cluster creation until the cluster is really ready.",
+      "value": "${concat(local_file.kubeconfig.*.filename, [\"\"])[0]}"
+    },
+    "node_groups": {
+      "description": "Outputs from EKS node groups. Map of maps, keyed by var.node_groups keys",
+      "value": "${module.node_groups.node_groups}"
+    },
+    "oidc_provider_arn": {
+      "description": "The ARN of the OIDC Provider if `enable_irsa = true`.",
+      "value": "${var.enable_irsa ? concat(aws_iam_openid_connect_provider.oidc_provider[*].arn, [\"\"])[0] : null}"
+    },
+    "security_group_rule_cluster_https_worker_ingress": {
+      "description": "Security group rule responsible for allowing pods to communicate with the EKS cluster API.",
+      "value": "${aws_security_group_rule.cluster_https_worker_ingress}"
+    },
+    "worker_iam_instance_profile_arns": {
+      "description": "default IAM instance profile ARN for EKS worker groups",
+      "value": "${concat(\n    aws_iam_instance_profile.workers.*.arn,\n    aws_iam_instance_profile.workers_launch_template.*.arn\n  )}"
+    },
+    "worker_iam_instance_profile_names": {
+      "description": "default IAM instance profile name for EKS worker groups",
+      "value": "${concat(\n    aws_iam_instance_profile.workers.*.name,\n    aws_iam_instance_profile.workers_launch_template.*.name\n  )}"
+    },
+    "worker_iam_role_arn": {
+      "description": "default IAM role ARN for EKS worker groups",
+      "value": "${coalescelist(\n    aws_iam_role.workers.*.arn,\n    data.aws_iam_instance_profile.custom_worker_group_iam_instance_profile.*.role_arn,\n    data.aws_iam_instance_profile.custom_worker_group_launch_template_iam_instance_profile.*.role_arn,\n    [\"\"]\n  )[0]}"
+    },
+    "worker_iam_role_name": {
+      "description": "default IAM role name for EKS worker groups",
+      "value": "${coalescelist(\n    aws_iam_role.workers.*.name,\n    data.aws_iam_instance_profile.custom_worker_group_iam_instance_profile.*.role_name,\n    data.aws_iam_instance_profile.custom_worker_group_launch_template_iam_instance_profile.*.role_name,\n    [\"\"]\n  )[0]}"
+    },
+    "worker_security_group_id": {
+      "description": "Security group ID attached to the EKS workers.",
+      "value": "${local.worker_security_group_id}"
+    },
+    "workers_asg_arns": {
+      "description": "IDs of the autoscaling groups containing workers.",
+      "value": "${concat(\n    aws_autoscaling_group.workers.*.arn,\n    aws_autoscaling_group.workers_launch_template.*.arn,\n  )}"
+    },
+    "workers_asg_names": {
+      "description": "Names of the autoscaling groups containing workers.",
+      "value": "${concat(\n    aws_autoscaling_group.workers.*.id,\n    aws_autoscaling_group.workers_launch_template.*.id,\n  )}"
+    },
+    "workers_default_ami_id": {
+      "description": "ID of the default worker group AMI",
+      "value": "${local.default_ami_id_linux}"
+    },
+    "workers_default_ami_id_windows": {
+      "description": "ID of the default Windows worker group AMI",
+      "value": "${local.default_ami_id_windows}"
+    },
+    "workers_launch_template_arns": {
+      "description": "ARNs of the worker launch templates.",
+      "value": "${aws_launch_template.workers_launch_template.*.arn}"
+    },
+    "workers_launch_template_ids": {
+      "description": "IDs of the worker launch templates.",
+      "value": "${aws_launch_template.workers_launch_template.*.id}"
+    },
+    "workers_launch_template_latest_versions": {
+      "description": "Latest versions of the worker launch templates.",
+      "value": "${aws_launch_template.workers_launch_template.*.latest_version}"
+    },
+    "workers_user_data": {
+      "description": "User data of worker groups",
+      "value": "${concat(\n    local.userdata_rendered,\n    local.launch_template_userdata_rendered,\n  )}"
+    }
+  },
+  "resource": {
+    "aws_autoscaling_group": {
+      "workers": {
+        "capacity_rebalance": "${lookup(\n    var.worker_groups[count.index],\n    \"capacity_rebalance\",\n    local.workers_group_defaults[\"capacity_rebalance\"]\n  )}",
+        "count": "${var.create_eks ? local.worker_group_count : 0}",
+        "default_cooldown": "${lookup(\n    var.worker_groups[count.index],\n    \"default_cooldown\",\n    local.workers_group_defaults[\"default_cooldown\"]\n  )}",
+        "desired_capacity": "${lookup(\n    var.worker_groups[count.index],\n    \"asg_desired_capacity\",\n    local.workers_group_defaults[\"asg_desired_capacity\"],\n  )}",
+        "dynamic": {
+          "initial_lifecycle_hook": {
+            "content": {
+              "default_result": "${lookup(initial_lifecycle_hook.value, \"default_result\", null)}",
+              "heartbeat_timeout": "${lookup(initial_lifecycle_hook.value, \"heartbeat_timeout\", null)}",
+              "lifecycle_transition": "${initial_lifecycle_hook.value[\"lifecycle_transition\"]}",
+              "name": "${initial_lifecycle_hook.value[\"name\"]}",
+              "notification_metadata": "${lookup(initial_lifecycle_hook.value, \"notification_metadata\", null)}",
+              "notification_target_arn": "${lookup(initial_lifecycle_hook.value, \"notification_target_arn\", null)}",
+              "role_arn": "${lookup(initial_lifecycle_hook.value, \"role_arn\", null)}"
+            },
+            "for_each": "${var.worker_create_initial_lifecycle_hooks ? lookup(var.worker_groups[count.index], \"asg_initial_lifecycle_hooks\", local.workers_group_defaults[\"asg_initial_lifecycle_hooks\"]) : []}"
+          },
+          "instance_refresh": {
+            "content": {
+              "preferences": {
+                "instance_warmup": "${lookup(\n          var.worker_groups[count.index], \"instance_refresh_instance_warmup\",\n          local.workers_group_defaults[\"instance_refresh_instance_warmup\"]\n        )}",
+                "min_healthy_percentage": "${lookup(\n          var.worker_groups[count.index], \"instance_refresh_min_healthy_percentage\",\n          local.workers_group_defaults[\"instance_refresh_min_healthy_percentage\"]\n        )}"
+              },
+              "strategy": "${lookup(\n        var.worker_groups[count.index], \"instance_refresh_strategy\",\n        local.workers_group_defaults[\"instance_refresh_strategy\"]\n      )}",
+              "triggers": "${lookup(\n        var.worker_groups[count.index], \"instance_refresh_triggers\",\n        local.workers_group_defaults[\"instance_refresh_triggers\"]\n      )}"
+            },
+            "for_each": "${lookup(var.worker_groups[count.index],\n      \"instance_refresh_enabled\",\n    local.workers_group_defaults[\"instance_refresh_enabled\"]) ? [1] : []}"
+          },
+          "tag": {
+            "content": {
+              "key": "${tag.value.key}",
+              "propagate_at_launch": "${tag.value.propagate_at_launch}",
+              "value": "${tag.value.value}"
+            },
+            "for_each": "${concat(\n      [\n        {\n          \"key\"                 = \"Name\"\n          \"value\"               = \"${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}-${lookup(var.worker_groups[count.index], \"name\", count.index)}-eks_asg\"\n          \"propagate_at_launch\" = true\n        },\n        {\n          \"key\"                 = \"kubernetes.io/cluster/${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}\"\n          \"value\"               = \"owned\"\n          \"propagate_at_launch\" = true\n        },\n        {\n          \"key\"                 = \"k8s.io/cluster/${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}\"\n          \"value\"               = \"owned\"\n          \"propagate_at_launch\" = true\n        },\n      ],\n      [\n        for tag_key, tag_value in var.tags :\n        {\n          \"key\"                 = tag_key,\n          \"value\"               = tag_value,\n          \"propagate_at_launch\" = \"true\"\n        }\n        if tag_key != \"Name\" \u0026\u0026 !contains([for tag in lookup(var.worker_groups[count.index], \"tags\", local.workers_group_defaults[\"tags\"]) : tag[\"key\"]], tag_key)\n      ],\n      lookup(\n        var.worker_groups[count.index],\n        \"tags\",\n        local.workers_group_defaults[\"tags\"]\n      )\n    )}"
+          },
+          "warm_pool": {
+            "content": {
+              "max_group_prepared_capacity": "${lookup(warm_pool.value, \"max_group_prepared_capacity\", null)}",
+              "min_size": "${lookup(warm_pool.value, \"min_size\", null)}",
+              "pool_state": "${lookup(warm_pool.value, \"pool_state\", null)}"
+            },
+            "for_each": "${lookup(var.worker_groups[count.index], \"warm_pool\", null) != null ? [lookup(var.worker_groups[count.index], \"warm_pool\")] : []}"
+          }
+        },
+        "enabled_metrics": "${lookup(\n    var.worker_groups[count.index],\n    \"enabled_metrics\",\n    local.workers_group_defaults[\"enabled_metrics\"]\n  )}",
+        "force_delete": "${lookup(\n    var.worker_groups[count.index],\n    \"asg_force_delete\",\n    local.workers_group_defaults[\"asg_force_delete\"],\n  )}",
+        "health_check_grace_period": "${lookup(\n    var.worker_groups[count.index],\n    \"health_check_grace_period\",\n    local.workers_group_defaults[\"health_check_grace_period\"]\n  )}",
+        "health_check_type": "${lookup(\n    var.worker_groups[count.index],\n    \"health_check_type\",\n    local.workers_group_defaults[\"health_check_type\"]\n  )}",
+        "launch_configuration": "${aws_launch_configuration.workers.*.id[count.index]}",
+        "lifecycle": {
+          "create_before_destroy": true,
+          "ignore_changes": [
+            "${desired_capacity}"
+          ]
+        },
+        "load_balancers": "${lookup(\n    var.worker_groups[count.index],\n    \"load_balancers\",\n    local.workers_group_defaults[\"load_balancers\"]\n  )}",
+        "max_instance_lifetime": "${lookup(\n    var.worker_groups[count.index],\n    \"max_instance_lifetime\",\n    local.workers_group_defaults[\"max_instance_lifetime\"],\n  )}",
+        "max_size": "${lookup(\n    var.worker_groups[count.index],\n    \"asg_max_size\",\n    local.workers_group_defaults[\"asg_max_size\"],\n  )}",
+        "min_size": "${lookup(\n    var.worker_groups[count.index],\n    \"asg_min_size\",\n    local.workers_group_defaults[\"asg_min_size\"],\n  )}",
+        "name_prefix": "${join(\n    \"-\",\n    compact(\n      [\n        coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0],\n        lookup(var.worker_groups[count.index], \"name\", count.index)\n      ]\n    )\n  )}",
+        "placement_group": "${lookup(\n    var.worker_groups[count.index],\n    \"placement_group\",\n    local.workers_group_defaults[\"placement_group\"],\n  )}",
+        "protect_from_scale_in": "${lookup(\n    var.worker_groups[count.index],\n    \"protect_from_scale_in\",\n    local.workers_group_defaults[\"protect_from_scale_in\"],\n  )}",
+        "service_linked_role_arn": "${lookup(\n    var.worker_groups[count.index],\n    \"service_linked_role_arn\",\n    local.workers_group_defaults[\"service_linked_role_arn\"],\n  )}",
+        "suspended_processes": "${lookup(\n    var.worker_groups[count.index],\n    \"suspended_processes\",\n    local.workers_group_defaults[\"suspended_processes\"]\n  )}",
+        "target_group_arns": "${lookup(\n    var.worker_groups[count.index],\n    \"target_group_arns\",\n    local.workers_group_defaults[\"target_group_arns\"]\n  )}",
+        "termination_policies": "${lookup(\n    var.worker_groups[count.index],\n    \"termination_policies\",\n    local.workers_group_defaults[\"termination_policies\"]\n  )}",
+        "vpc_zone_identifier": "${lookup(\n    var.worker_groups[count.index],\n    \"subnets\",\n    local.workers_group_defaults[\"subnets\"]\n  )}"
+      },
+      "workers_launch_template": {
+        "capacity_rebalance": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"capacity_rebalance\",\n    local.workers_group_defaults[\"capacity_rebalance\"]\n  )}",
+        "count": "${var.create_eks ? local.worker_group_launch_template_count : 0}",
+        "default_cooldown": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"default_cooldown\",\n    local.workers_group_defaults[\"default_cooldown\"]\n  )}",
+        "desired_capacity": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"asg_desired_capacity\",\n    local.workers_group_defaults[\"asg_desired_capacity\"],\n  )}",
+        "dynamic": {
+          "initial_lifecycle_hook": {
+            "content": {
+              "default_result": "${lookup(initial_lifecycle_hook.value, \"default_result\", null)}",
+              "heartbeat_timeout": "${lookup(initial_lifecycle_hook.value, \"heartbeat_timeout\", null)}",
+              "lifecycle_transition": "${initial_lifecycle_hook.value[\"lifecycle_transition\"]}",
+              "name": "${initial_lifecycle_hook.value[\"name\"]}",
+              "notification_metadata": "${lookup(initial_lifecycle_hook.value, \"notification_metadata\", null)}",
+              "notification_target_arn": "${lookup(initial_lifecycle_hook.value, \"notification_target_arn\", null)}",
+              "role_arn": "${lookup(initial_lifecycle_hook.value, \"role_arn\", null)}"
+            },
+            "for_each": "${var.worker_create_initial_lifecycle_hooks ? lookup(var.worker_groups_launch_template[count.index], \"asg_initial_lifecycle_hooks\", local.workers_group_defaults[\"asg_initial_lifecycle_hooks\"]) : []}"
+          },
+          "instance_refresh": {
+            "content": {
+              "preferences": {
+                "instance_warmup": "${lookup(\n          var.worker_groups_launch_template[count.index], \"instance_refresh_instance_warmup\",\n          local.workers_group_defaults[\"instance_refresh_instance_warmup\"]\n        )}",
+                "min_healthy_percentage": "${lookup(\n          var.worker_groups_launch_template[count.index], \"instance_refresh_min_healthy_percentage\",\n          local.workers_group_defaults[\"instance_refresh_min_healthy_percentage\"]\n        )}"
+              },
+              "strategy": "${lookup(\n        var.worker_groups_launch_template[count.index], \"instance_refresh_strategy\",\n        local.workers_group_defaults[\"instance_refresh_strategy\"]\n      )}",
+              "triggers": "${lookup(\n        var.worker_groups_launch_template[count.index], \"instance_refresh_triggers\",\n        local.workers_group_defaults[\"instance_refresh_triggers\"]\n      )}"
+            },
+            "for_each": "${lookup(var.worker_groups_launch_template[count.index],\n      \"instance_refresh_enabled\",\n    local.workers_group_defaults[\"instance_refresh_enabled\"]) ? [1] : []}"
+          },
+          "launch_template": {
+            "content": {
+              "id": "${aws_launch_template.workers_launch_template.*.id[count.index]}",
+              "version": "${lookup(\n        var.worker_groups_launch_template[count.index],\n        \"launch_template_version\",\n        lookup(\n          var.worker_groups_launch_template[count.index],\n          \"launch_template_version\",\n          local.workers_group_defaults[\"launch_template_version\"]\n        ) == \"$Latest\"\n        ? aws_launch_template.workers_launch_template.*.latest_version[count.index]\n        : aws_launch_template.workers_launch_template.*.default_version[count.index]\n      )}"
+            },
+            "for_each": "${(lookup(var.worker_groups_launch_template[count.index], \"override_instance_types\", null) != null) || (lookup(var.worker_groups_launch_template[count.index], \"on_demand_allocation_strategy\", local.workers_group_defaults[\"on_demand_allocation_strategy\"]) != null) ? [] : [var.worker_groups_launch_template[count.index]]}",
+            "iterator": "${item}"
+          },
+          "mixed_instances_policy": {
+            "content": {
+              "instances_distribution": {
+                "on_demand_allocation_strategy": "${lookup(\n          item.value,\n          \"on_demand_allocation_strategy\",\n          \"prioritized\",\n        )}",
+                "on_demand_base_capacity": "${lookup(\n          item.value,\n          \"on_demand_base_capacity\",\n          local.workers_group_defaults[\"on_demand_base_capacity\"],\n        )}",
+                "on_demand_percentage_above_base_capacity": "${lookup(\n          item.value,\n          \"on_demand_percentage_above_base_capacity\",\n          local.workers_group_defaults[\"on_demand_percentage_above_base_capacity\"],\n        )}",
+                "spot_allocation_strategy": "${lookup(\n          item.value,\n          \"spot_allocation_strategy\",\n          local.workers_group_defaults[\"spot_allocation_strategy\"],\n        )}",
+                "spot_instance_pools": "${lookup(\n          item.value,\n          \"spot_instance_pools\",\n          local.workers_group_defaults[\"spot_instance_pools\"],\n        )}",
+                "spot_max_price": "${lookup(\n          item.value,\n          \"spot_max_price\",\n          local.workers_group_defaults[\"spot_max_price\"],\n        )}"
+              },
+              "launch_template": {
+                "dynamic": {
+                  "override": {
+                    "content": {
+                      "instance_type": "${override.value}"
+                    },
+                    "for_each": "${lookup(\n            var.worker_groups_launch_template[count.index],\n            \"override_instance_types\",\n            local.workers_group_defaults[\"override_instance_types\"]\n          )}"
+                  }
+                },
+                "launch_template_specification": {
+                  "launch_template_id": "${aws_launch_template.workers_launch_template.*.id[count.index]}",
+                  "version": "${lookup(\n            var.worker_groups_launch_template[count.index],\n            \"launch_template_version\",\n            lookup(\n              var.worker_groups_launch_template[count.index],\n              \"launch_template_version\",\n              local.workers_group_defaults[\"launch_template_version\"]\n            ) == \"$Latest\"\n            ? aws_launch_template.workers_launch_template.*.latest_version[count.index]\n            : aws_launch_template.workers_launch_template.*.default_version[count.index]\n          )}"
+                }
+              }
+            },
+            "for_each": "${(lookup(var.worker_groups_launch_template[count.index], \"override_instance_types\", null) != null) || (lookup(var.worker_groups_launch_template[count.index], \"on_demand_allocation_strategy\", local.workers_group_defaults[\"on_demand_allocation_strategy\"]) != null) ? [var.worker_groups_launch_template[count.index]] : []}",
+            "iterator": "${item}"
+          },
+          "tag": {
+            "content": {
+              "key": "${tag.value.key}",
+              "propagate_at_launch": "${tag.value.propagate_at_launch}",
+              "value": "${tag.value.value}"
+            },
+            "for_each": "${concat(\n      [\n        {\n          \"key\" = \"Name\"\n          \"value\" = \"${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}-${lookup(\n            var.worker_groups_launch_template[count.index],\n            \"name\",\n            count.index,\n          )}-eks_asg\"\n          \"propagate_at_launch\" = true\n        },\n        {\n          \"key\"                 = \"kubernetes.io/cluster/${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}\"\n          \"value\"               = \"owned\"\n          \"propagate_at_launch\" = true\n        },\n      ],\n      [\n        for tag_key, tag_value in var.tags :\n        tomap({\n          key                 = tag_key\n          value               = tag_value\n          propagate_at_launch = \"true\"\n        })\n        if tag_key != \"Name\" \u0026\u0026 !contains([for tag in lookup(var.worker_groups_launch_template[count.index], \"tags\", local.workers_group_defaults[\"tags\"]) : tag[\"key\"]], tag_key)\n      ],\n      lookup(\n        var.worker_groups_launch_template[count.index],\n        \"tags\",\n        local.workers_group_defaults[\"tags\"]\n      )\n    )}"
+          },
+          "warm_pool": {
+            "content": {
+              "max_group_prepared_capacity": "${lookup(warm_pool.value, \"max_group_prepared_capacity\", null)}",
+              "min_size": "${lookup(warm_pool.value, \"min_size\", null)}",
+              "pool_state": "${lookup(warm_pool.value, \"pool_state\", null)}"
+            },
+            "for_each": "${lookup(var.worker_groups_launch_template[count.index], \"warm_pool\", null) != null ? [lookup(var.worker_groups_launch_template[count.index], \"warm_pool\")] : []}"
+          }
+        },
+        "enabled_metrics": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"enabled_metrics\",\n    local.workers_group_defaults[\"enabled_metrics\"]\n  )}",
+        "force_delete": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"asg_force_delete\",\n    local.workers_group_defaults[\"asg_force_delete\"],\n  )}",
+        "health_check_grace_period": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"health_check_grace_period\",\n    local.workers_group_defaults[\"health_check_grace_period\"]\n  )}",
+        "health_check_type": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"health_check_type\",\n    local.workers_group_defaults[\"health_check_type\"]\n  )}",
+        "lifecycle": {
+          "create_before_destroy": true,
+          "ignore_changes": [
+            "${desired_capacity}"
+          ]
+        },
+        "load_balancers": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"load_balancers\",\n    local.workers_group_defaults[\"load_balancers\"]\n  )}",
+        "max_instance_lifetime": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"max_instance_lifetime\",\n    local.workers_group_defaults[\"max_instance_lifetime\"],\n  )}",
+        "max_size": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"asg_max_size\",\n    local.workers_group_defaults[\"asg_max_size\"],\n  )}",
+        "min_size": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"asg_min_size\",\n    local.workers_group_defaults[\"asg_min_size\"],\n  )}",
+        "name_prefix": "${join(\n    \"-\",\n    compact(\n      [\n        coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0],\n        lookup(var.worker_groups_launch_template[count.index], \"name\", count.index)\n      ]\n    )\n  )}",
+        "placement_group": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"placement_group\",\n    local.workers_group_defaults[\"placement_group\"],\n  )}",
+        "protect_from_scale_in": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"protect_from_scale_in\",\n    local.workers_group_defaults[\"protect_from_scale_in\"],\n  )}",
+        "service_linked_role_arn": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"service_linked_role_arn\",\n    local.workers_group_defaults[\"service_linked_role_arn\"],\n  )}",
+        "suspended_processes": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"suspended_processes\",\n    local.workers_group_defaults[\"suspended_processes\"]\n  )}",
+        "target_group_arns": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"target_group_arns\",\n    local.workers_group_defaults[\"target_group_arns\"]\n  )}",
+        "termination_policies": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"termination_policies\",\n    local.workers_group_defaults[\"termination_policies\"]\n  )}",
+        "vpc_zone_identifier": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"subnets\",\n    local.workers_group_defaults[\"subnets\"]\n  )}"
+      }
+    },
+    "aws_cloudwatch_log_group": {
+      "this": {
+        "count": "${length(var.cluster_enabled_log_types) \u003e 0 \u0026\u0026 var.create_eks ? 1 : 0}",
+        "kms_key_id": "${var.cluster_log_kms_key_id}",
+        "name": "/aws/eks/${var.cluster_name}/cluster",
+        "retention_in_days": "${var.cluster_log_retention_in_days}",
+        "tags": "${var.tags}"
+      }
+    },
+    "aws_eks_cluster": {
+      "this": {
+        "count": "${var.create_eks ? 1 : 0}",
+        "depends_on": [
+          "${aws_security_group_rule.cluster_egress_internet}",
+          "${aws_security_group_rule.cluster_https_worker_ingress}",
+          "${aws_iam_role_policy_attachment.cluster_AmazonEKSClusterPolicy}",
+          "${aws_iam_role_policy_attachment.cluster_AmazonEKSServicePolicy}",
+          "${aws_iam_role_policy_attachment.cluster_AmazonEKSVPCResourceControllerPolicy}",
+          "${aws_cloudwatch_log_group.this}"
+        ],
+        "dynamic": {
+          "encryption_config": {
+            "content": {
+              "provider": {
+                "key_arn": "${encryption_config.value[\"provider_key_arn\"]}"
+              },
+              "resources": "${encryption_config.value[\"resources\"]}"
+            },
+            "for_each": "${toset(var.cluster_encryption_config)}"
+          }
+        },
+        "enabled_cluster_log_types": "${var.cluster_enabled_log_types}",
+        "kubernetes_network_config": {
+          "service_ipv4_cidr": "${var.cluster_service_ipv4_cidr}"
+        },
+        "name": "${var.cluster_name}",
+        "role_arn": "${local.cluster_iam_role_arn}",
+        "tags": "${var.tags}",
+        "timeouts": {
+          "create": "${var.cluster_create_timeout}",
+          "delete": "${var.cluster_delete_timeout}"
+        },
+        "version": "${var.cluster_version}",
+        "vpc_config": {
+          "endpoint_private_access": "${var.cluster_endpoint_private_access}",
+          "endpoint_public_access": "${var.cluster_endpoint_public_access}",
+          "public_access_cidrs": "${var.cluster_endpoint_public_access_cidrs}",
+          "security_group_ids": "${compact([local.cluster_security_group_id])}",
+          "subnet_ids": "${var.subnets}"
+        }
+      }
+    },
+    "aws_iam_instance_profile": {
+      "workers": {
+        "count": "${var.manage_worker_iam_resources \u0026\u0026 var.create_eks ? local.worker_group_count : 0}",
+        "lifecycle": {
+          "create_before_destroy": true
+        },
+        "name_prefix": "${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}",
+        "path": "${var.iam_path}",
+        "role": "${lookup(\n    var.worker_groups[count.index],\n    \"iam_role_id\",\n    local.default_iam_role_id,\n  )}",
+        "tags": "${var.tags}"
+      },
+      "workers_launch_template": {
+        "count": "${var.manage_worker_iam_resources \u0026\u0026 var.create_eks ? local.worker_group_launch_template_count : 0}",
+        "lifecycle": {
+          "create_before_destroy": true
+        },
+        "name_prefix": "${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}",
+        "path": "${var.iam_path}",
+        "role": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"iam_role_id\",\n    local.default_iam_role_id,\n  )}",
+        "tags": "${var.tags}"
+      }
+    },
+    "aws_iam_openid_connect_provider": {
+      "oidc_provider": {
+        "client_id_list": [
+          "${local.sts_principal}"
+        ],
+        "count": "${var.enable_irsa \u0026\u0026 var.create_eks ? 1 : 0}",
+        "tags": "${merge(\n    {\n      Name = \"${var.cluster_name}-eks-irsa\"\n    },\n    var.tags\n  )}",
+        "thumbprint_list": [
+          "${var.eks_oidc_root_ca_thumbprint}"
+        ],
+        "url": "${flatten(concat(aws_eks_cluster.this[*].identity[*].oidc.0.issuer, [\"\"]))[0]}"
+      }
+    },
+    "aws_iam_policy": {
+      "cluster_elb_sl_role_creation": {
+        "count": "${var.manage_cluster_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Permissions for EKS to create AWSServiceRoleForElasticLoadBalancing service-linked role",
+        "name_prefix": "${var.cluster_name}-elb-sl-role-creation",
+        "path": "${var.iam_path}",
+        "policy": "${data.aws_iam_policy_document.cluster_elb_sl_role_creation[0].json}",
+        "tags": "${var.tags}"
+      }
+    },
+    "aws_iam_role": {
+      "cluster": {
+        "assume_role_policy": "${data.aws_iam_policy_document.cluster_assume_role_policy.json}",
+        "count": "${var.manage_cluster_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "force_detach_policies": true,
+        "name": "${var.cluster_iam_role_name != \"\" ? var.cluster_iam_role_name : null}",
+        "name_prefix": "${var.cluster_iam_role_name != \"\" ? null : var.cluster_name}",
+        "path": "${var.iam_path}",
+        "permissions_boundary": "${var.permissions_boundary}",
+        "tags": "${var.tags}"
+      },
+      "workers": {
+        "assume_role_policy": "${data.aws_iam_policy_document.workers_assume_role_policy.json}",
+        "count": "${var.manage_worker_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "force_detach_policies": true,
+        "name": "${var.workers_role_name != \"\" ? var.workers_role_name : null}",
+        "name_prefix": "${var.workers_role_name != \"\" ? null : coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}",
+        "path": "${var.iam_path}",
+        "permissions_boundary": "${var.permissions_boundary}",
+        "tags": "${var.tags}"
+      }
+    },
+    "aws_iam_role_policy_attachment": {
+      "cluster_AmazonEKSClusterPolicy": {
+        "count": "${var.manage_cluster_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "policy_arn": "${local.policy_arn_prefix}/AmazonEKSClusterPolicy",
+        "role": "${local.cluster_iam_role_name}"
+      },
+      "cluster_AmazonEKSServicePolicy": {
+        "count": "${var.manage_cluster_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "policy_arn": "${local.policy_arn_prefix}/AmazonEKSServicePolicy",
+        "role": "${local.cluster_iam_role_name}"
+      },
+      "cluster_AmazonEKSVPCResourceControllerPolicy": {
+        "count": "${var.manage_cluster_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "policy_arn": "${local.policy_arn_prefix}/AmazonEKSVPCResourceController",
+        "role": "${local.cluster_iam_role_name}"
+      },
+      "cluster_elb_sl_role_creation": {
+        "count": "${var.manage_cluster_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "policy_arn": "${aws_iam_policy.cluster_elb_sl_role_creation[0].arn}",
+        "role": "${local.cluster_iam_role_name}"
+      },
+      "workers_AmazonEC2ContainerRegistryReadOnly": {
+        "count": "${var.manage_worker_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "policy_arn": "${local.policy_arn_prefix}/AmazonEC2ContainerRegistryReadOnly",
+        "role": "${aws_iam_role.workers[0].name}"
+      },
+      "workers_AmazonEKSWorkerNodePolicy": {
+        "count": "${var.manage_worker_iam_resources \u0026\u0026 var.create_eks ? 1 : 0}",
+        "policy_arn": "${local.policy_arn_prefix}/AmazonEKSWorkerNodePolicy",
+        "role": "${aws_iam_role.workers[0].name}"
+      },
+      "workers_AmazonEKS_CNI_Policy": {
+        "count": "${var.manage_worker_iam_resources \u0026\u0026 var.attach_worker_cni_policy \u0026\u0026 var.create_eks ? 1 : 0}",
+        "policy_arn": "${local.policy_arn_prefix}/AmazonEKS_CNI_Policy",
+        "role": "${aws_iam_role.workers[0].name}"
+      },
+      "workers_additional_policies": {
+        "count": "${var.manage_worker_iam_resources \u0026\u0026 var.create_eks ? length(var.workers_additional_policies) : 0}",
+        "policy_arn": "${var.workers_additional_policies[count.index]}",
+        "role": "${aws_iam_role.workers[0].name}"
+      }
+    },
+    "aws_launch_configuration": {
+      "workers": {
+        "associate_public_ip_address": "${lookup(\n    var.worker_groups[count.index],\n    \"public_ip\",\n    local.workers_group_defaults[\"public_ip\"],\n  )}",
+        "count": "${var.create_eks ? local.worker_group_count : 0}",
+        "depends_on": [
+          "${aws_security_group_rule.workers_egress_internet}",
+          "${aws_security_group_rule.workers_ingress_self}",
+          "${aws_security_group_rule.workers_ingress_cluster}",
+          "${aws_security_group_rule.workers_ingress_cluster_kubelet}",
+          "${aws_security_group_rule.workers_ingress_cluster_https}",
+          "${aws_security_group_rule.workers_ingress_cluster_primary}",
+          "${aws_security_group_rule.cluster_primary_ingress_workers}",
+          "${aws_iam_role_policy_attachment.workers_AmazonEKSWorkerNodePolicy}",
+          "${aws_iam_role_policy_attachment.workers_AmazonEKS_CNI_Policy}",
+          "${aws_iam_role_policy_attachment.workers_AmazonEC2ContainerRegistryReadOnly}",
+          "${aws_iam_role_policy_attachment.workers_additional_policies}"
+        ],
+        "dynamic": {
+          "ebs_block_device": {
+            "content": {
+              "delete_on_termination": "${lookup(ebs_block_device.value, \"delete_on_termination\", true)}",
+              "device_name": "${ebs_block_device.value.block_device_name}",
+              "encrypted": "${lookup(\n        ebs_block_device.value,\n        \"encrypted\",\n        local.workers_group_defaults[\"root_encrypted\"],\n      )}",
+              "iops": "${lookup(\n        ebs_block_device.value,\n        \"iops\",\n        local.workers_group_defaults[\"root_iops\"],\n      )}",
+              "volume_size": "${lookup(\n        ebs_block_device.value,\n        \"volume_size\",\n        local.workers_group_defaults[\"root_volume_size\"],\n      )}",
+              "volume_type": "${lookup(\n        ebs_block_device.value,\n        \"volume_type\",\n        local.workers_group_defaults[\"root_volume_type\"],\n      )}"
+            },
+            "for_each": "${lookup(var.worker_groups[count.index], \"additional_ebs_volumes\", local.workers_group_defaults[\"additional_ebs_volumes\"])}"
+          }
+        },
+        "ebs_optimized": "${lookup(\n    var.worker_groups[count.index],\n    \"ebs_optimized\",\n    !contains(\n      local.ebs_optimized_not_supported,\n      lookup(\n        var.worker_groups[count.index],\n        \"instance_type\",\n        local.workers_group_defaults[\"instance_type\"]\n      )\n    )\n  )}",
+        "enable_monitoring": "${lookup(\n    var.worker_groups[count.index],\n    \"enable_monitoring\",\n    local.workers_group_defaults[\"enable_monitoring\"],\n  )}",
+        "iam_instance_profile": "${coalescelist(\n    aws_iam_instance_profile.workers.*.id,\n    data.aws_iam_instance_profile.custom_worker_group_iam_instance_profile.*.name,\n  )[count.index]}",
+        "image_id": "${lookup(\n    var.worker_groups[count.index],\n    \"ami_id\",\n    lookup(var.worker_groups[count.index], \"platform\", local.workers_group_defaults[\"platform\"]) == \"windows\" ? local.default_ami_id_windows : local.default_ami_id_linux,\n  )}",
+        "instance_type": "${lookup(\n    var.worker_groups[count.index],\n    \"instance_type\",\n    local.workers_group_defaults[\"instance_type\"],\n  )}",
+        "key_name": "${lookup(\n    var.worker_groups[count.index],\n    \"key_name\",\n    local.workers_group_defaults[\"key_name\"],\n  )}",
+        "lifecycle": {
+          "create_before_destroy": true
+        },
+        "metadata_options": {
+          "http_endpoint": "${lookup(\n      var.worker_groups[count.index],\n      \"metadata_http_endpoint\",\n      local.workers_group_defaults[\"metadata_http_endpoint\"],\n    )}",
+          "http_put_response_hop_limit": "${lookup(\n      var.worker_groups[count.index],\n      \"metadata_http_put_response_hop_limit\",\n      local.workers_group_defaults[\"metadata_http_put_response_hop_limit\"],\n    )}",
+          "http_tokens": "${lookup(\n      var.worker_groups[count.index],\n      \"metadata_http_tokens\",\n      local.workers_group_defaults[\"metadata_http_tokens\"],\n    )}"
+        },
+        "name_prefix": "${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}-${lookup(var.worker_groups[count.index], \"name\", count.index)}",
+        "placement_tenancy": "${lookup(\n    var.worker_groups[count.index],\n    \"placement_tenancy\",\n    local.workers_group_defaults[\"placement_tenancy\"],\n  )}",
+        "root_block_device": {
+          "delete_on_termination": true,
+          "encrypted": "${lookup(\n      var.worker_groups[count.index],\n      \"root_encrypted\",\n      local.workers_group_defaults[\"root_encrypted\"],\n    )}",
+          "iops": "${lookup(\n      var.worker_groups[count.index],\n      \"root_iops\",\n      local.workers_group_defaults[\"root_iops\"],\n    )}",
+          "volume_size": "${lookup(\n      var.worker_groups[count.index],\n      \"root_volume_size\",\n      local.workers_group_defaults[\"root_volume_size\"],\n    )}",
+          "volume_type": "${lookup(\n      var.worker_groups[count.index],\n      \"root_volume_type\",\n      local.workers_group_defaults[\"root_volume_type\"],\n    )}"
+        },
+        "security_groups": "${flatten([\n    local.worker_security_group_id,\n    var.worker_additional_security_group_ids,\n    lookup(\n      var.worker_groups[count.index],\n      \"additional_security_group_ids\",\n      local.workers_group_defaults[\"additional_security_group_ids\"]\n    )\n  ])}",
+        "spot_price": "${lookup(\n    var.worker_groups[count.index],\n    \"spot_price\",\n    local.workers_group_defaults[\"spot_price\"],\n  )}",
+        "user_data_base64": "${base64encode(local.userdata_rendered[count.index])}"
+      }
+    },
+    "aws_launch_template": {
+      "workers_launch_template": {
+        "block_device_mappings": {
+          "device_name": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"root_block_device_name\",\n      lookup(var.worker_groups_launch_template[count.index], \"platform\", local.workers_group_defaults[\"platform\"]) == \"windows\" ? local.workers_group_defaults[\"root_block_device_name_windows\"] : local.workers_group_defaults[\"root_block_device_name\"],\n    )}",
+          "ebs": {
+            "delete_on_termination": true,
+            "encrypted": "${lookup(\n        var.worker_groups_launch_template[count.index],\n        \"root_encrypted\",\n        local.workers_group_defaults[\"root_encrypted\"],\n      )}",
+            "iops": "${lookup(\n        var.worker_groups_launch_template[count.index],\n        \"root_iops\",\n        local.workers_group_defaults[\"root_iops\"],\n      )}",
+            "kms_key_id": "${lookup(\n        var.worker_groups_launch_template[count.index],\n        \"root_kms_key_id\",\n        local.workers_group_defaults[\"root_kms_key_id\"],\n      )}",
+            "throughput": "${lookup(\n        var.worker_groups_launch_template[count.index],\n        \"root_volume_throughput\",\n        local.workers_group_defaults[\"root_volume_throughput\"],\n      )}",
+            "volume_size": "${lookup(\n        var.worker_groups_launch_template[count.index],\n        \"root_volume_size\",\n        local.workers_group_defaults[\"root_volume_size\"],\n      )}",
+            "volume_type": "${lookup(\n        var.worker_groups_launch_template[count.index],\n        \"root_volume_type\",\n        local.workers_group_defaults[\"root_volume_type\"],\n      )}"
+          }
+        },
+        "count": "${var.create_eks ? (local.worker_group_launch_template_count) : 0}",
+        "depends_on": [
+          "${aws_security_group_rule.workers_egress_internet}",
+          "${aws_security_group_rule.workers_ingress_self}",
+          "${aws_security_group_rule.workers_ingress_cluster}",
+          "${aws_security_group_rule.workers_ingress_cluster_kubelet}",
+          "${aws_security_group_rule.workers_ingress_cluster_https}",
+          "${aws_security_group_rule.workers_ingress_cluster_primary}",
+          "${aws_security_group_rule.cluster_primary_ingress_workers}",
+          "${aws_iam_role_policy_attachment.workers_AmazonEKSWorkerNodePolicy}",
+          "${aws_iam_role_policy_attachment.workers_AmazonEKS_CNI_Policy}",
+          "${aws_iam_role_policy_attachment.workers_AmazonEC2ContainerRegistryReadOnly}",
+          "${aws_iam_role_policy_attachment.workers_additional_policies}"
+        ],
+        "dynamic": {
+          "block_device_mappings": [
+            {
+              "content": {
+                "device_name": "${block_device_mappings.value.block_device_name}",
+                "ebs": {
+                  "delete_on_termination": "${lookup(block_device_mappings.value, \"delete_on_termination\", true)}",
+                  "encrypted": "${lookup(\n          block_device_mappings.value,\n          \"encrypted\",\n          local.workers_group_defaults[\"root_encrypted\"],\n        )}",
+                  "iops": "${lookup(\n          block_device_mappings.value,\n          \"iops\",\n          local.workers_group_defaults[\"root_iops\"],\n        )}",
+                  "kms_key_id": "${lookup(\n          block_device_mappings.value,\n          \"kms_key_id\",\n          local.workers_group_defaults[\"root_kms_key_id\"],\n        )}",
+                  "throughput": "${lookup(\n          block_device_mappings.value,\n          \"throughput\",\n          local.workers_group_defaults[\"root_volume_throughput\"],\n        )}",
+                  "volume_size": "${lookup(\n          block_device_mappings.value,\n          \"volume_size\",\n          local.workers_group_defaults[\"root_volume_size\"],\n        )}",
+                  "volume_type": "${lookup(\n          block_device_mappings.value,\n          \"volume_type\",\n          local.workers_group_defaults[\"root_volume_type\"],\n        )}"
+                }
+              },
+              "for_each": "${lookup(var.worker_groups_launch_template[count.index], \"additional_ebs_volumes\", local.workers_group_defaults[\"additional_ebs_volumes\"])}"
+            },
+            {
+              "content": {
+                "device_name": "${block_device_mappings.value.block_device_name}",
+                "virtual_name": "${lookup(\n        block_device_mappings.value,\n        \"virtual_name\",\n        local.workers_group_defaults[\"instance_store_virtual_name\"],\n      )}"
+              },
+              "for_each": "${lookup(var.worker_groups_launch_template[count.index], \"additional_instance_store_volumes\", local.workers_group_defaults[\"additional_instance_store_volumes\"])}"
+            }
+          ],
+          "credit_specification": {
+            "content": {
+              "cpu_credits": "${credit_specification.value}"
+            },
+            "for_each": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"cpu_credits\",\n      local.workers_group_defaults[\"cpu_credits\"]\n    ) != null ? [lookup(var.worker_groups_launch_template[count.index], \"cpu_credits\", local.workers_group_defaults[\"cpu_credits\"])] : []}"
+          },
+          "elastic_inference_accelerator": {
+            "content": {
+              "type": "${elastic_inference_accelerator.value}"
+            },
+            "for_each": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"elastic_inference_accelerator\",\n      local.workers_group_defaults[\"elastic_inference_accelerator\"]\n    ) != null ? [lookup(var.worker_groups_launch_template[count.index], \"elastic_inference_accelerator\", local.workers_group_defaults[\"elastic_inference_accelerator\"])] : []}"
+          },
+          "instance_market_options": {
+            "content": {
+              "market_type": "${instance_market_options.value}"
+            },
+            "for_each": "${lookup(var.worker_groups_launch_template[count.index], \"market_type\", null) == null ? [] : tolist([lookup(var.worker_groups_launch_template[count.index], \"market_type\", null)])}"
+          },
+          "placement": {
+            "content": {
+              "group_name": "${placement.value}",
+              "tenancy": "${lookup(\n        var.worker_groups_launch_template[count.index],\n        \"launch_template_placement_tenancy\",\n        local.workers_group_defaults[\"launch_template_placement_tenancy\"],\n      )}"
+            },
+            "for_each": "${lookup(var.worker_groups_launch_template[count.index], \"launch_template_placement_group\", local.workers_group_defaults[\"launch_template_placement_group\"]) != null ? [lookup(var.worker_groups_launch_template[count.index], \"launch_template_placement_group\", local.workers_group_defaults[\"launch_template_placement_group\"])] : []}"
+          }
+        },
+        "ebs_optimized": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"ebs_optimized\",\n    !contains(\n      local.ebs_optimized_not_supported,\n      lookup(\n        var.worker_groups_launch_template[count.index],\n        \"instance_type\",\n        local.workers_group_defaults[\"instance_type\"],\n      )\n    )\n  )}",
+        "enclave_options": {
+          "enabled": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"enclave_support\",\n      local.workers_group_defaults[\"enclave_support\"],\n    )}"
+        },
+        "iam_instance_profile": {
+          "name": "${coalescelist(\n      aws_iam_instance_profile.workers_launch_template.*.name,\n      data.aws_iam_instance_profile.custom_worker_group_launch_template_iam_instance_profile.*.name,\n    )[count.index]}"
+        },
+        "image_id": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"ami_id\",\n    lookup(var.worker_groups_launch_template[count.index], \"platform\", local.workers_group_defaults[\"platform\"]) == \"windows\" ? local.default_ami_id_windows : local.default_ami_id_linux,\n  )}",
+        "instance_type": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"instance_type\",\n    local.workers_group_defaults[\"instance_type\"],\n  )}",
+        "key_name": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"key_name\",\n    local.workers_group_defaults[\"key_name\"],\n  )}",
+        "lifecycle": {
+          "create_before_destroy": true
+        },
+        "metadata_options": {
+          "http_endpoint": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"metadata_http_endpoint\",\n      local.workers_group_defaults[\"metadata_http_endpoint\"],\n    )}",
+          "http_put_response_hop_limit": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"metadata_http_put_response_hop_limit\",\n      local.workers_group_defaults[\"metadata_http_put_response_hop_limit\"],\n    )}",
+          "http_tokens": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"metadata_http_tokens\",\n      local.workers_group_defaults[\"metadata_http_tokens\"],\n    )}"
+        },
+        "monitoring": {
+          "enabled": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"enable_monitoring\",\n      local.workers_group_defaults[\"enable_monitoring\"],\n    )}"
+        },
+        "name_prefix": "${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}-${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"name\",\n    count.index,\n  )}",
+        "network_interfaces": {
+          "associate_public_ip_address": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"public_ip\",\n      local.workers_group_defaults[\"public_ip\"],\n    )}",
+          "delete_on_termination": "${lookup(\n      var.worker_groups_launch_template[count.index],\n      \"eni_delete\",\n      local.workers_group_defaults[\"eni_delete\"],\n    )}",
+          "security_groups": "${flatten([\n      local.worker_security_group_id,\n      var.worker_additional_security_group_ids,\n      lookup(\n        var.worker_groups_launch_template[count.index],\n        \"additional_security_group_ids\",\n        local.workers_group_defaults[\"additional_security_group_ids\"],\n      ),\n    ])}"
+        },
+        "tag_specifications": [
+          {
+            "resource_type": "volume",
+            "tags": "${merge(\n      {\n        \"Name\" = \"${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}-${lookup(\n          var.worker_groups_launch_template[count.index],\n          \"name\",\n          count.index,\n        )}-eks_asg\"\n      },\n      var.tags,\n    )}"
+          },
+          {
+            "resource_type": "instance",
+            "tags": "${merge(\n      {\n        \"Name\" = \"${coalescelist(aws_eks_cluster.this[*].name, [\"\"])[0]}-${lookup(\n          var.worker_groups_launch_template[count.index],\n          \"name\",\n          count.index,\n        )}-eks_asg\"\n      },\n      { for tag_key, tag_value in var.tags :\n        tag_key =\u003e tag_value\n        if tag_key != \"Name\" \u0026\u0026 !contains([for tag in lookup(var.worker_groups_launch_template[count.index], \"tags\", local.workers_group_defaults[\"tags\"]) : tag[\"key\"]], tag_key)\n      }\n    )}"
+          }
+        ],
+        "tags": "${var.tags}",
+        "update_default_version": "${lookup(\n    var.worker_groups_launch_template[count.index],\n    \"update_default_version\",\n    local.workers_group_defaults[\"update_default_version\"],\n  )}",
+        "user_data": "${base64encode(\n    local.launch_template_userdata_rendered[count.index],\n  )}"
+      }
+    },
+    "aws_security_group": {
+      "cluster": {
+        "count": "${var.cluster_create_security_group \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "EKS cluster security group.",
+        "name_prefix": "${var.cluster_name}",
+        "tags": "${merge(\n    var.tags,\n    {\n      \"Name\" = \"${var.cluster_name}-eks_cluster_sg\"\n    },\n  )}",
+        "vpc_id": "${var.vpc_id}"
+      },
+      "workers": {
+        "count": "${var.worker_create_security_group \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Security group for all nodes in the cluster.",
+        "name_prefix": "${var.cluster_name}",
+        "tags": "${merge(\n    var.tags,\n    {\n      \"Name\"                                      = \"${var.cluster_name}-eks_worker_sg\"\n      \"kubernetes.io/cluster/${var.cluster_name}\" = \"owned\"\n    },\n  )}",
+        "vpc_id": "${var.vpc_id}"
+      }
+    },
+    "aws_security_group_rule": {
+      "cluster_egress_internet": {
+        "cidr_blocks": "${var.cluster_egress_cidrs}",
+        "count": "${var.cluster_create_security_group \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Allow cluster egress access to the Internet.",
+        "from_port": 0,
+        "protocol": "-1",
+        "security_group_id": "${local.cluster_security_group_id}",
+        "to_port": 0,
+        "type": "egress"
+      },
+      "cluster_https_worker_ingress": {
+        "count": "${var.cluster_create_security_group \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Allow pods to communicate with the EKS cluster API.",
+        "from_port": 443,
+        "protocol": "tcp",
+        "security_group_id": "${local.cluster_security_group_id}",
+        "source_security_group_id": "${local.worker_security_group_id}",
+        "to_port": 443,
+        "type": "ingress"
+      },
+      "cluster_primary_ingress_workers": {
+        "count": "${var.worker_create_security_group \u0026\u0026 var.worker_create_cluster_primary_security_group_rules \u0026\u0026 var.cluster_version \u003e= 1.14 \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Allow pods running on workers to send communication to cluster primary security group (e.g. Fargate pods).",
+        "from_port": 0,
+        "protocol": "all",
+        "security_group_id": "${local.cluster_primary_security_group_id}",
+        "source_security_group_id": "${local.worker_security_group_id}",
+        "to_port": 65535,
+        "type": "ingress"
+      },
+      "cluster_private_access_cidrs_source": {
+        "cidr_blocks": "${var.cluster_endpoint_private_access_cidrs}",
+        "count": "${var.create_eks \u0026\u0026 var.cluster_create_endpoint_private_access_sg_rule \u0026\u0026 var.cluster_endpoint_private_access \u0026\u0026 var.cluster_endpoint_private_access_cidrs != null ? 1 : 0}",
+        "description": "Allow private K8S API ingress from custom CIDR source.",
+        "from_port": 443,
+        "protocol": "tcp",
+        "security_group_id": "${aws_eks_cluster.this[0].vpc_config[0].cluster_security_group_id}",
+        "to_port": 443,
+        "type": "ingress"
+      },
+      "cluster_private_access_sg_source": {
+        "count": "${var.create_eks \u0026\u0026 var.cluster_create_endpoint_private_access_sg_rule \u0026\u0026 var.cluster_endpoint_private_access \u0026\u0026 var.cluster_endpoint_private_access_sg != null ? length(var.cluster_endpoint_private_access_sg) : 0}",
+        "description": "Allow private K8S API ingress from custom Security Groups source.",
+        "from_port": 443,
+        "protocol": "tcp",
+        "security_group_id": "${aws_eks_cluster.this[0].vpc_config[0].cluster_security_group_id}",
+        "source_security_group_id": "${var.cluster_endpoint_private_access_sg[count.index]}",
+        "to_port": 443,
+        "type": "ingress"
+      },
+      "workers_egress_internet": {
+        "cidr_blocks": "${var.workers_egress_cidrs}",
+        "count": "${var.worker_create_security_group \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Allow nodes all egress to the Internet.",
+        "from_port": 0,
+        "protocol": "-1",
+        "security_group_id": "${local.worker_security_group_id}",
+        "to_port": 0,
+        "type": "egress"
+      },
+      "workers_ingress_cluster": {
+        "count": "${var.worker_create_security_group \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Allow workers pods to receive communication from the cluster control plane.",
+        "from_port": "${var.worker_sg_ingress_from_port}",
+        "protocol": "tcp",
+        "security_group_id": "${local.worker_security_group_id}",
+        "source_security_group_id": "${local.cluster_security_group_id}",
+        "to_port": 65535,
+        "type": "ingress"
+      },
+      "workers_ingress_cluster_https": {
+        "count": "${var.worker_create_security_group \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Allow pods running extension API servers on port 443 to receive communication from cluster control plane.",
+        "from_port": 443,
+        "protocol": "tcp",
+        "security_group_id": "${local.worker_security_group_id}",
+        "source_security_group_id": "${local.cluster_security_group_id}",
+        "to_port": 443,
+        "type": "ingress"
+      },
+      "workers_ingress_cluster_kubelet": {
+        "count": "${var.worker_create_security_group \u0026\u0026 var.create_eks ? var.worker_sg_ingress_from_port \u003e 10250 ? 1 : 0 : 0}",
+        "description": "Allow workers Kubelets to receive communication from the cluster control plane.",
+        "from_port": 10250,
+        "protocol": "tcp",
+        "security_group_id": "${local.worker_security_group_id}",
+        "source_security_group_id": "${local.cluster_security_group_id}",
+        "to_port": 10250,
+        "type": "ingress"
+      },
+      "workers_ingress_cluster_primary": {
+        "count": "${var.worker_create_security_group \u0026\u0026 var.worker_create_cluster_primary_security_group_rules \u0026\u0026 var.cluster_version \u003e= 1.14 \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Allow pods running on workers to receive communication from cluster primary security group (e.g. Fargate pods).",
+        "from_port": 0,
+        "protocol": "all",
+        "security_group_id": "${local.worker_security_group_id}",
+        "source_security_group_id": "${local.cluster_primary_security_group_id}",
+        "to_port": 65535,
+        "type": "ingress"
+      },
+      "workers_ingress_self": {
+        "count": "${var.worker_create_security_group \u0026\u0026 var.create_eks ? 1 : 0}",
+        "description": "Allow node to communicate with each other.",
+        "from_port": 0,
+        "protocol": "-1",
+        "security_group_id": "${local.worker_security_group_id}",
+        "source_security_group_id": "${local.worker_security_group_id}",
+        "to_port": 65535,
+        "type": "ingress"
+      }
+    },
+    "kubernetes_config_map": {
+      "aws_auth": {
+        "count": "${var.create_eks \u0026\u0026 var.manage_aws_auth ? 1 : 0}",
+        "data": {
+          "mapAccounts": "${yamlencode(var.map_accounts)}",
+          "mapRoles": "${yamlencode(\n      distinct(concat(\n        local.configmap_roles,\n        var.map_roles,\n      ))\n    )}",
+          "mapUsers": "${yamlencode(var.map_users)}"
+        },
+        "depends_on": [
+          "${data.http.wait_for_cluster[0]}"
+        ],
+        "metadata": {
+          "labels": "${merge(\n      {\n        \"app.kubernetes.io/managed-by\" = \"Terraform\"\n        # / are replaced by . because label validator fails in this lib\n        # https://github.com/kubernetes/apimachinery/blob/1bdd76d09076d4dc0362456e59c8f551f5f24a72/pkg/util/validation/validation.go#L166\n        \"terraform.io/module\" = \"terraform-aws-modules.eks.aws\"\n      },\n      var.aws_auth_additional_labels\n    )}",
+          "name": "aws-auth",
+          "namespace": "kube-system"
+        }
+      }
+    },
+    "local_file": {
+      "kubeconfig": {
+        "content": "${local.kubeconfig}",
+        "count": "${var.write_kubeconfig \u0026\u0026 var.create_eks ? 1 : 0}",
+        "directory_permission": "0755",
+        "file_permission": "${var.kubeconfig_file_permission}",
+        "filename": "${substr(var.kubeconfig_output_path, -1, 1) == \"/\" ? \"${var.kubeconfig_output_path}kubeconfig_${var.cluster_name}\" : var.kubeconfig_output_path}"
+      }
+    }
+  },
+  "terraform": {
+    "required_providers": {
+      "aws": "\u003e= 3.40.0",
+      "http": {
+        "source": "terraform-aws-modules/http",
+        "version": "\u003e= 2.4.1"
+      },
+      "kubernetes": "\u003e= 1.11.1",
+      "local": "\u003e= 1.4"
+    },
+    "required_version": "\u003e= 0.13.1"
+  },
+  "variable": {
+    "attach_worker_cni_policy": {
+      "default": true,
+      "description": "Whether to attach the Amazon managed `AmazonEKS_CNI_Policy` IAM policy to the default worker IAM role. WARNING: If set `false` the permissions must be assigned to the `aws-node` DaemonSet pods via another method or nodes will not be able to join the cluster.",
+      "type": "${bool}"
+    },
+    "aws_auth_additional_labels": {
+      "default": {},
+      "description": "Additional kubernetes labels applied on aws-auth ConfigMap",
+      "type": "${map(string)}"
+    },
+    "cluster_create_endpoint_private_access_sg_rule": {
+      "default": false,
+      "description": "Whether to create security group rules for the access to the Amazon EKS private API server endpoint. When is `true`, `cluster_endpoint_private_access_cidrs` must be setted.",
+      "type": "${bool}"
+    },
+    "cluster_create_security_group": {
+      "default": true,
+      "description": "Whether to create a security group for the cluster or attach the cluster to `cluster_security_group_id`.",
+      "type": "${bool}"
+    },
+    "cluster_create_timeout": {
+      "default": "30m",
+      "description": "Timeout value when creating the EKS cluster.",
+      "type": "${string}"
+    },
+    "cluster_delete_timeout": {
+      "default": "15m",
+      "description": "Timeout value when deleting the EKS cluster.",
+      "type": "${string}"
+    },
+    "cluster_egress_cidrs": {
+      "default": [
+        "0.0.0.0/0"
+      ],
+      "description": "List of CIDR blocks that are permitted for cluster egress traffic.",
+      "type": "${list(string)}"
+    },
+    "cluster_enabled_log_types": {
+      "default": null,
+      "description": "A list of the desired control plane logging to enable. For more information, see Amazon EKS Control Plane Logging documentation (https://docs.aws.amazon.com/eks/latest/userguide/control-plane-logs.html)",
+      "type": "${list(string)}"
+    },
+    "cluster_encryption_config": {
+      "default": null,
+      "description": "Configuration block with encryption configuration for the cluster. See examples/secrets_encryption/main.tf for example format",
+      "type": "${list(object({\n    provider_key_arn = string\n    resources        = list(string)\n  }))}"
+    },
+    "cluster_endpoint_private_access": {
+      "default": false,
+      "description": "Indicates whether or not the Amazon EKS private API server endpoint is enabled.",
+      "type": "${bool}"
+    },
+    "cluster_endpoint_private_access_cidrs": {
+      "default": null,
+      "description": "List of CIDR blocks which can access the Amazon EKS private API server endpoint. To use this `cluster_endpoint_private_access` and `cluster_create_endpoint_private_access_sg_rule` must be set to `true`.",
+      "type": "${list(string)}"
+    },
+    "cluster_endpoint_private_access_sg": {
+      "default": null,
+      "description": "List of security group IDs which can access the Amazon EKS private API server endpoint. To use this `cluster_endpoint_private_access` and `cluster_create_endpoint_private_access_sg_rule` must be set to `true`.",
+      "type": "${list(string)}"
+    },
+    "cluster_endpoint_public_access": {
+      "default": true,
+      "description": "Indicates whether or not the Amazon EKS public API server endpoint is enabled. When it's set to `false` ensure to have a proper private access with `cluster_endpoint_private_access = true`.",
+      "type": "${bool}"
+    },
+    "cluster_endpoint_public_access_cidrs": {
+      "default": [
+        "0.0.0.0/0"
+      ],
+      "description": "List of CIDR blocks which can access the Amazon EKS public API server endpoint.",
+      "type": "${list(string)}"
+    },
+    "cluster_iam_role_name": {
+      "default": "",
+      "description": "IAM role name for the cluster. If manage_cluster_iam_resources is set to false, set this to reuse an existing IAM role. If manage_cluster_iam_resources is set to true, set this to force the created role name.",
+      "type": "${string}"
+    },
+    "cluster_log_kms_key_id": {
+      "default": "",
+      "description": "If a KMS Key ARN is set, this key will be used to encrypt the corresponding log group. Please be sure that the KMS Key has an appropriate key policy (https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/encrypt-log-data-kms.html)",
+      "type": "${string}"
+    },
+    "cluster_log_retention_in_days": {
+      "default": 90,
+      "description": "Number of days to retain log events. Default retention - 90 days.",
+      "type": "${number}"
+    },
+    "cluster_name": {
+      "description": "Name of the EKS cluster. Also used as a prefix in names of related resources.",
+      "type": "${string}"
+    },
+    "cluster_security_group_id": {
+      "default": "",
+      "description": "If provided, the EKS cluster will be attached to this security group. If not given, a security group will be created with necessary ingress/egress to work with the workers",
+      "type": "${string}"
+    },
+    "cluster_service_ipv4_cidr": {
+      "default": null,
+      "description": "service ipv4 cidr for the kubernetes cluster",
+      "type": "${string}"
+    },
+    "cluster_version": {
+      "description": "Kubernetes version to use for the EKS cluster.",
+      "type": "${string}"
+    },
+    "create_eks": {
+      "default": true,
+      "description": "Controls if EKS resources should be created (it affects almost all resources)",
+      "type": "${bool}"
+    },
+    "create_fargate_pod_execution_role": {
+      "default": true,
+      "description": "Controls if the EKS Fargate pod execution IAM role should be created.",
+      "type": "${bool}"
+    },
+    "eks_oidc_root_ca_thumbprint": {
+      "default": "9e99a48a9960b14926bb7f3b02e22da2b0ab7280",
+      "description": "Thumbprint of Root CA for EKS OIDC, Valid until 2037",
+      "type": "${string}"
+    },
+    "enable_irsa": {
+      "default": false,
+      "description": "Whether to create OpenID Connect Provider for EKS to enable IRSA",
+      "type": "${bool}"
+    },
+    "fargate_pod_execution_role_name": {
+      "default": null,
+      "description": "The IAM Role that provides permissions for the EKS Fargate Profile.",
+      "type": "${string}"
+    },
+    "fargate_profiles": {
+      "default": {},
+      "description": "Fargate profiles to create. See `fargate_profile` keys section in fargate submodule's README.md for more details",
+      "type": "${any}"
+    },
+    "iam_path": {
+      "default": "/",
+      "description": "If provided, all IAM roles will be created on this path.",
+      "type": "${string}"
+    },
+    "kubeconfig_aws_authenticator_additional_args": {
+      "default": null,
+      "description": "Any additional arguments to pass to the authenticator such as the role to assume. e.g. [\"-r\", \"MyEksRole\"].",
+      "type": "${list(string)}"
+    },
+    "kubeconfig_aws_authenticator_command": {
+      "default": "aws-iam-authenticator",
+      "description": "Command to use to fetch AWS EKS credentials.",
+      "type": "${string}"
+    },
+    "kubeconfig_aws_authenticator_command_args": {
+      "default": null,
+      "description": "Default arguments passed to the authenticator command. Defaults to [token -i $cluster_name].",
+      "type": "${list(string)}"
+    },
+    "kubeconfig_aws_authenticator_env_variables": {
+      "default": {},
+      "description": "Environment variables that should be used when executing the authenticator. e.g. { AWS_PROFILE = \"eks\"}.",
+      "type": "${map(string)}"
+    },
+    "kubeconfig_file_permission": {
+      "default": "0600",
+      "description": "File permission of the Kubectl config file containing cluster configuration saved to `kubeconfig_output_path.`",
+      "type": "${string}"
+    },
+    "kubeconfig_name": {
+      "default": "",
+      "description": "Override the default name used for items kubeconfig.",
+      "type": "${string}"
+    },
+    "kubeconfig_output_path": {
+      "default": "./",
+      "description": "Where to save the Kubectl config file (if `write_kubeconfig = true`). Assumed to be a directory if the value ends with a forward slash `/`.",
+      "type": "${string}"
+    },
+    "manage_aws_auth": {
+      "default": true,
+      "description": "Whether to apply the aws-auth configmap file."
+    },
+    "manage_cluster_iam_resources": {
+      "default": true,
+      "description": "Whether to let the module manage cluster IAM resources. If set to false, cluster_iam_role_name must be specified.",
+      "type": "${bool}"
+    },
+    "manage_worker_iam_resources": {
+      "default": true,
+      "description": "Whether to let the module manage worker IAM resources. If set to false, iam_instance_profile_name must be specified for workers.",
+      "type": "${bool}"
+    },
+    "map_accounts": {
+      "default": null,
+      "description": "Additional AWS account numbers to add to the aws-auth configmap. See examples/basic/variables.tf for example format.",
+      "type": "${list(string)}"
+    },
+    "map_roles": {
+      "default": null,
+      "description": "Additional IAM roles to add to the aws-auth configmap. See examples/basic/variables.tf for example format.",
+      "type": "${list(object({\n    rolearn  = string\n    username = string\n    groups   = list(string)\n  }))}"
+    },
+    "map_users": {
+      "default": null,
+      "description": "Additional IAM users to add to the aws-auth configmap. See examples/basic/variables.tf for example format.",
+      "type": "${list(object({\n    userarn  = string\n    username = string\n    groups   = list(string)\n  }))}"
+    },
+    "node_groups": {
+      "default": {},
+      "description": "Map of map of node groups to create. See `node_groups` module's documentation for more details",
+      "type": "${any}"
+    },
+    "node_groups_defaults": {
+      "default": {},
+      "description": "Map of values to be applied to all node groups. See `node_groups` module's documentation for more details",
+      "type": "${any}"
+    },
+    "permissions_boundary": {
+      "default": null,
+      "description": "If provided, all IAM roles will be created with this permissions boundary attached.",
+      "type": "${string}"
+    },
+    "subnets": {
+      "description": "A list of subnets to place the EKS cluster and workers within.",
+      "type": "${list(string)}"
+    },
+    "tags": {
+      "default": {},
+      "description": "A map of tags to add to all resources. Tags added to launch configuration or templates override these values for ASG Tags only.",
+      "type": "${map(string)}"
+    },
+    "vpc_id": {
+      "description": "VPC where the cluster and workers will be deployed.",
+      "type": "${string}"
+    },
+    "wait_for_cluster_timeout": {
+      "default": 300,
+      "description": "A timeout (in seconds) to wait for cluster to be available.",
+      "type": "${number}"
+    },
+    "worker_additional_security_group_ids": {
+      "default": null,
+      "description": "A list of additional security group ids to attach to worker instances",
+      "type": "${list(string)}"
+    },
+    "worker_ami_name_filter": {
+      "default": "",
+      "description": "Name filter for AWS EKS worker AMI. If not provided, the latest official AMI for the specified 'cluster_version' is used.",
+      "type": "${string}"
+    },
+    "worker_ami_name_filter_windows": {
+      "default": "",
+      "description": "Name filter for AWS EKS Windows worker AMI. If not provided, the latest official AMI for the specified 'cluster_version' is used.",
+      "type": "${string}"
+    },
+    "worker_ami_owner_id": {
+      "default": "amazon",
+      "description": "The ID of the owner for the AMI to use for the AWS EKS workers. Valid values are an AWS account ID, 'self' (the current account), or an AWS owner alias (e.g. 'amazon', 'aws-marketplace', 'microsoft').",
+      "type": "${string}"
+    },
+    "worker_ami_owner_id_windows": {
+      "default": "amazon",
+      "description": "The ID of the owner for the AMI to use for the AWS EKS Windows workers. Valid values are an AWS account ID, 'self' (the current account), or an AWS owner alias (e.g. 'amazon', 'aws-marketplace', 'microsoft').",
+      "type": "${string}"
+    },
+    "worker_create_cluster_primary_security_group_rules": {
+      "default": false,
+      "description": "Whether to create security group rules to allow communication between pods on workers and pods using the primary cluster security group.",
+      "type": "${bool}"
+    },
+    "worker_create_initial_lifecycle_hooks": {
+      "default": false,
+      "description": "Whether to create initial lifecycle hooks provided in worker groups.",
+      "type": "${bool}"
+    },
+    "worker_create_security_group": {
+      "default": true,
+      "description": "Whether to create a security group for the workers or attach the workers to `worker_security_group_id`.",
+      "type": "${bool}"
+    },
+    "worker_groups": {
+      "default": null,
+      "description": "A list of maps defining worker group configurations to be defined using AWS Launch Configurations. See workers_group_defaults for valid keys.",
+      "type": "${any}"
+    },
+    "worker_groups_launch_template": {
+      "default": null,
+      "description": "A list of maps defining worker group configurations to be defined using AWS Launch Templates. See workers_group_defaults for valid keys.",
+      "type": "${any}"
+    },
+    "worker_security_group_id": {
+      "default": "",
+      "description": "If provided, all workers will be attached to this security group. If not given, a security group will be created with necessary ingress/egress to work with the EKS cluster.",
+      "type": "${string}"
+    },
+    "worker_sg_ingress_from_port": {
+      "default": 1025,
+      "description": "Minimum port number from which pods will accept communication. Must be changed to a lower value if some pods in your cluster will expose a port lower than 1025 (e.g. 22, 80, or 443).",
+      "type": "${number}"
+    },
+    "workers_additional_policies": {
+      "default": null,
+      "description": "Additional policies to be added to workers",
+      "type": "${list(string)}"
+    },
+    "workers_egress_cidrs": {
+      "default": [
+        "0.0.0.0/0"
+      ],
+      "description": "List of CIDR blocks that are permitted for workers egress traffic.",
+      "type": "${list(string)}"
+    },
+    "workers_group_defaults": {
+      "default": {},
+      "description": "Override default values for target groups. See workers_group_defaults_defaults in local.tf for valid keys.",
+      "type": "${any}"
+    },
+    "workers_role_name": {
+      "default": "",
+      "description": "User defined workers role name.",
+      "type": "${string}"
+    },
+    "write_kubeconfig": {
+      "default": true,
+      "description": "Whether to write a Kubectl config file containing the cluster configuration. Saved to `kubeconfig_output_path`.",
+      "type": "${bool}"
+    }
+  }
+}
