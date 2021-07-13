@@ -1,26 +1,29 @@
 import { Command } from 'commander';
 import { execSync } from 'child_process';
 import { exit } from 'process';
-const trace = require('debug')("trace");
 const debug = require('debug')("debug");
 const package_json = require("../package.json");
 
 /** Regular expression for finding references in values */
 const identifyReferences = /((var\.(?![0-9])[-\w][-\w]*)|(local\.(?![0-9])[-\w][-\w]*)|(data\.(?![0-9])[-\w][-\w]*\.(?![0-9])[-\w][-\w]*)|((?![0-9])[\w][-\w]*\.(?![0-9])[-\w][-\w]*))/g
 
+/** A vertex or node in the graph. */
 interface Node {
     id: number;
     label: string;
     type: string;
-    isData: boolean
+    isData: boolean;
+    isPruned: boolean;
 }
 
+/** An edge connecting two Nodes, describing a dependency. */
 interface Edge {
     id: number;
     sourceId: number;
     targetId: number;
     label: string;
-    direct: boolean;
+    isDirect: boolean;
+    isPruned: boolean;
 }
 
 let id = 0;
@@ -28,17 +31,30 @@ const nodes = new Map<string, Node>();
 const edges = new Array<Edge>();
 
 /**
- * Convert the Terraform files in a directory to a JS object.
- * 
- * @param targetDir a directory containing a Terraform module
- * @param hclToJsonPath the hcl2json command to use
- * @returns a ovject representation of the module
+ * Get a list of resource references in a string.
+ * NB: this is not perfect, and false positives do occur!
+ * @param value a value, posssibly containing references
+ * @returns a list of reference names
  */
-function getTfJson(targetDir: string, hclToJsonPath: string): any {
-    const output: string = execSync(`cat ${targetDir}/*.tf | ${hclToJsonPath}`, { encoding: 'utf-8' });
-    return JSON.parse(output);
+function getReferences(value: any): string[] {
+    const valueBlob = JSON.stringify(value);
+    let match: any;
+
+    const matches = new Array<string>();
+
+    // This is a hack to ignore strings that _definitely_ don't contain references,
+    if (!valueBlob.includes("${")) return [];
+
+    while (match = identifyReferences.exec(valueBlob)) {
+        matches.push(match[1]);
+    }
+    return matches;
 }
 
+/**
+ * Construct a node and add it to the global node map.
+ * @param label the node's text label
+ */
 function createNodeIfNotExists(label: string) {
     if (nodes.has(label)) return;
 
@@ -62,26 +78,30 @@ function createNodeIfNotExists(label: string) {
         return;
     }
 
-    trace(`node: ${label}`)
-
     const node: Node = {
         id: id++,
         label,
         type,
-        isData
+        isData,
+        isPruned: false
     }
 
     nodes.set(label, node)
 }
 
-function createEdgeIfNotExists(source: string, label: string, target: string, direct: boolean) {
+/**
+ * Create an edge and add it to the global edge list.
+ * @param source the source node's label
+ * @param label the edge text label
+ * @param target the target node's label
+ * @param direct is the source a direct dependency?
+ */
+function createEdge(source: string, label: string, target: string, direct: boolean) {
     const parts = source.split('.')
     if (parts.length == 2 && parts[0] == "count") {
         // Skip references to the count variable
         return;
     }
-
-    trace(`edge: ${source} (${label}) ${target}`)
 
     const sourceNode = nodes.get(source);
     const targetNode = nodes.get(target);
@@ -94,89 +114,79 @@ function createEdgeIfNotExists(source: string, label: string, target: string, di
         sourceId: sourceNode.id,
         targetId: targetNode.id,
         label,
-        direct
+        isDirect: direct,
+        isPruned: false
     }
 
     edges.push(edge);
 
 }
 
+/**
+ * Generate nodes for data- and resource objects and edges and nodes for their dependencies.
+ * @param categoryObject the part of a TF JSON file that contains resources or data.
+ * @param prefix an optional label prefix
+ */
 function processNestedResourceCategory(categoryObject: any, prefix: string = "") {
     for (const [dataType, dataInstance] of new Map<string, any>(Object.entries(categoryObject))) {
         for (const [label, parameters] of new Map<string, any>(Object.entries(dataInstance))) {
             const target = `${prefix}${dataType}.${label}`;
-            createNodeIfNotExists(target);
+            try { createNodeIfNotExists(target); } catch (e) { throw new Error(`Unable to create node for "${target}": ${e.message}`); }
             for (const [key, value] of Object.entries(parameters)) {
-                const valueBlob = JSON.stringify(value);
-                let match: any;
-
-                const matches = new Array<string>();
-
-                while (match = identifyReferences.exec(valueBlob)) {
-                    matches.push(match[1]);
-                }
-
+                const matches = getReferences(value);
                 matches.forEach(source => {
                     try { createNodeIfNotExists(source); } catch (e) { throw new Error(`Unable to create node for "${source}": ${e.message}`); }
-                    try { createEdgeIfNotExists(source, key, target, (matches.length == 1)); } catch (e) { throw new Error(`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`); }
+                    try { createEdge(source, key, target, (matches.length == 1)); } catch (e) { throw new Error(`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`); }
                 });
             }
         }
     }
 }
 
+/**
+ * Generate nodes for `locals` and edges and nodes for the local's dependencies.
+ * @param categoryObject the part of a TF JSON file that contains the `locals`
+ */
 function processLocalsCategory(categoryObject: any) {
-    // debug(JSON.stringify(categoryObject))
-
     const locals: any = Array.from(categoryObject).reduce((acc, elem) => Object.assign(acc, elem), {})
     for (const [key, value] of Object.entries(locals)) {
         const target = `local.${key}`
         try { createNodeIfNotExists(target) } catch (e) { throw new Error(`Unable to create node for "${target}": ${e.message}`); }
 
-        const valueBlob = JSON.stringify(value)
-
-        if (!valueBlob.includes("${")) continue; // HACK
-        let match: any;
-
-        const matches = new Array<string>();
-
-        while (match = identifyReferences.exec(valueBlob)) {
-            matches.push(match[1])
-        }
-
+        const matches = getReferences(value);
         matches.forEach(source => {
             try { createNodeIfNotExists(source) } catch (e) { throw new Error(`Unable to create node for "${source}": ${e.message}`); }
-            try { createEdgeIfNotExists(source, key, target, (matches.length == 1)); } catch (e) { throw new Error(`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`); }
+            try { createEdge(source, key, target, (matches.length == 1)); } catch (e) { throw new Error(`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`); }
         });
     }
 }
 
+/**
+ * Generate nodes for module- and output objects and edges and nodes for their dependencies.
+ * @param categoryObject the part of a TF JSON file that contains modules or output.
+ * @param category the label prefix
+ * @param filteredProperties properties that should be ignored when looking for dependencies
+ */
 function processCategory(categoryObject: any, category: string, filteredProperties: string[] = []) {
     for (const [label, parameters] of new Map<string, any>(Object.entries(categoryObject))) {
         const target = `${category}.${label}`;
         createNodeIfNotExists(target);
         for (const [key, value] of Object.entries(parameters)) {
-            const valueBlob = JSON.stringify(value);
-
-            if (!valueBlob.includes("${")) continue; // HACK
-
-            let match: any;
-            const matches = new Array<string>();
-
-            while (match = identifyReferences.exec(valueBlob)) {
-                matches.push(match[1]);
-            }
-
+            const matches = getReferences(value);
             matches.forEach(source => {
                 if (!filteredProperties.includes(key)) {
                     try { createNodeIfNotExists(source); } catch (e) { throw new Error(`Unable to create node for "${source}": ${e.message}`); }
-                    try { createEdgeIfNotExists(source, key, target, (matches.length == 1)); } catch (e) { throw new Error(`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`); }
+                    try { createEdge(source, key, target, (matches.length == 1)); } catch (e) { throw new Error(`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`); }
                 }
             });
         }
     }
 }
 
+/**
+ * Generate nodes for variables and edges and nodes for the variables' dependencies.
+ * @param categoryObject the part of a TF JSON file that contains the variables.
+ */
 function processVariableCategory(categoryObject: any) {
     for (const [label, _] of new Map<string, any>(Object.entries(categoryObject))) {
         const target = `var.${label}`;
@@ -258,7 +268,7 @@ function getEdgeGml(edge: Edge): string {
 		graphics
 		[
 			smoothBends	1
-			style	"${edge.direct ? "line" : "dashed"}"
+			style	"${edge.isDirect ? "line" : "dashed"}"
 			fill	"#000000"
 			targetArrow	"standard"
 		]
@@ -273,17 +283,33 @@ function getEdgeGml(edge: Edge): string {
 	]`
 }
 
-// =================================================================================================
+/** If multiple edges connect the same node, join them into one edge. */
+function joinEdges() {
+    throw new Error('Function not implemented.');
+}
+
+/** Remove local nodes and route their dependencies to nodes that depended on the local. */
+function pruneLocals() {
+    throw new Error('Function not implemented.');
+}
+
+// ========================================= MAIN ==================================================
 
 const program = new Command();
 program.version(package_json.version).description(package_json.description);
 program
     .argument('[target-dir]', "a folder containing a Terraform module", ".")
     .option("-h, --hcl2json-path <hcl2json-path>", `the path where "hcl2json" is installed`, "hcl2json")
+    .option("-j, --join-edges", "If there are multiple edges from one resource to another, joint them into one")
+    .option("-p, --prune-locals", "Collapse edges through local vars so the pass directly to the target")
 
 program.parse(process.argv);
 
-const tfObject = getTfJson(program.processedArgs[0], program.getOptionValue("hcl2jsonPath"));
+const tfPath = program.processedArgs[0];
+const h2jPath = program.getOptionValue("hcl2jsonPath")
+const json = execSync(`cat ${tfPath}/*.tf | ${h2jPath}`, { encoding: 'utf-8' });
+const tfObject = JSON.parse(json);
+
 try {
     for (const [category, categoryObject] of Object.entries(tfObject)) {
         switch (category) {
@@ -299,15 +325,18 @@ try {
         }
     }
 } catch (e) {
-    console.error(
-        "Failed to process input: ", e.message,
-        // "\nNodes:", nodes,
-        // "\nEdges:", edges
-    );
-    exit(1);
-    // throw e
+    // console.error("Failed to process input: ", e.message);
+    // exit(1);
+    throw e
 }
 
+if (program.getOptionValue("pruneLocals")) {
+    pruneLocals();
+}
+
+if (program.getOptionValue("joinEdges")) {
+    joinEdges();
+}
 
 console.log(`graph
 [
