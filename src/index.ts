@@ -19,8 +19,8 @@ interface Node {
 /** An edge connecting two Nodes, describing a dependency. */
 interface Edge {
     id: number;
-    sourceId: number;
-    targetId: number;
+    source: Node;
+    target: Node;
     label: string;
     isDirect: boolean;
     isPruned: boolean;
@@ -42,6 +42,7 @@ function getReferences(value: any): string[] {
 
     const matches = new Array<string>();
 
+    debug(valueBlob)
     // This is a hack to ignore strings that _definitely_ don't contain references,
     if (!valueBlob.includes("${")) return [];
 
@@ -105,15 +106,14 @@ function createEdge(source: string, label: string, target: string, direct: boole
 
     const sourceNode = nodes.get(source);
     const targetNode = nodes.get(target);
-
     if (sourceNode === undefined) throw new Error(`Unexpected source vertex "${source}"`);
     if (targetNode === undefined) throw new Error(`Unexpected target vertex "${target}"`);
 
     const edge = {
         id: id++,
-        sourceId: sourceNode.id,
-        targetId: targetNode.id,
-        label,
+        source: sourceNode,
+        target: targetNode,
+        label: targetNode.type == "local" ? "" : label,
         isDirect: direct,
         isPruned: false
     }
@@ -121,6 +121,7 @@ function createEdge(source: string, label: string, target: string, direct: boole
     edges.push(edge);
 
 }
+
 
 /**
  * Generate nodes for data- and resource objects and edges and nodes for their dependencies.
@@ -148,7 +149,10 @@ function processNestedResourceCategory(categoryObject: any, prefix: string = "")
  * @param categoryObject the part of a TF JSON file that contains the `locals`
  */
 function processLocalsCategory(categoryObject: any) {
-    const locals: any = Array.from(categoryObject).reduce((acc, elem) => Object.assign(acc, elem), {})
+    let locals = categoryObject.length === undefined ?
+        categoryObject :
+        Array.from(categoryObject).reduce((acc, elem) => { Object.assign(acc, elem); return acc }, {})
+
     for (const [key, value] of Object.entries(locals)) {
         const target = `local.${key}`
         try { createNodeIfNotExists(target) } catch (e) { throw new Error(`Unable to create node for "${target}": ${e.message}`); }
@@ -166,8 +170,9 @@ function processLocalsCategory(categoryObject: any) {
  * @param categoryObject the part of a TF JSON file that contains modules or output.
  * @param category the label prefix
  * @param filteredProperties properties that should be ignored when looking for dependencies
+ * @param filteredLabels inbound edges that should not be labeled
  */
-function processCategory(categoryObject: any, category: string, filteredProperties: string[] = []) {
+function processCategory(categoryObject: any, category: string, filteredProperties: string[] = [], filteredLabels: string[] = []) {
     for (const [label, parameters] of new Map<string, any>(Object.entries(categoryObject))) {
         const target = `${category}.${label}`;
         createNodeIfNotExists(target);
@@ -176,7 +181,7 @@ function processCategory(categoryObject: any, category: string, filteredProperti
             matches.forEach(source => {
                 if (!filteredProperties.includes(key)) {
                     try { createNodeIfNotExists(source); } catch (e) { throw new Error(`Unable to create node for "${source}": ${e.message}`); }
-                    try { createEdge(source, key, target, (matches.length == 1)); } catch (e) { throw new Error(`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`); }
+                    try { createEdge(source, filteredLabels.includes(key) ? "" : key, target, (matches.length == 1)); } catch (e) { throw new Error(`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`); }
                 }
             });
         }
@@ -262,8 +267,8 @@ function getNodeGml(node: Node): string {
 function getEdgeGml(edge: Edge): string {
     return `	edge
 	[
-		source	${edge.sourceId}
-		target	${edge.targetId}
+		source	${edge.source.id}
+		target	${edge.target.id}
 		label	"${edge.label}"
 		graphics
 		[
@@ -288,9 +293,30 @@ function joinEdges() {
     throw new Error('Function not implemented.');
 }
 
-/** Remove local nodes and route their dependencies to nodes that depended on the local. */
+/**
+ * Recursively remove local nodes and route their dependencies to nodes that depended on the local.
+ */
 function pruneLocals() {
-    throw new Error('Function not implemented.');
+    Array.from(nodes.values())
+        .filter(node => node.type == "local")
+        .forEach(node => {
+            debug("local:", node.label)
+            node.isPruned = true
+            edges
+                .filter(inbound => inbound.target == node)
+                .forEach(inbound => {
+                    const source = inbound.source.label
+                    inbound.isPruned = true
+                    edges
+                        .filter(outbound => outbound.source == node)
+                        .forEach(outbound => {
+                            const target = outbound.target.label
+                            outbound.isPruned = true
+                            createEdge(source, "", target, false)
+                        })
+                })
+
+        })
 }
 
 // ========================================= MAIN ==================================================
@@ -316,7 +342,7 @@ try {
             case 'data': processNestedResourceCategory(categoryObject, "data."); break;
             case 'locals': processLocalsCategory(categoryObject); break;
             case 'module': processCategory(categoryObject, "module", ["source", "providers"]); break;
-            case 'output': processCategory(categoryObject, "output"); break;
+            case 'output': processCategory(categoryObject, "output", [], ["value"]); break;
             case 'variable': processVariableCategory(categoryObject); break;
             case 'terraform': break;
             case 'provider': break;
@@ -338,9 +364,19 @@ if (program.getOptionValue("joinEdges")) {
     joinEdges();
 }
 
+const nodeGml = Array.from(nodes.values())
+    .filter(node => !node.isPruned)
+    .map(getNodeGml)
+    .join("\n")
+
+const edgeGml = Array.from(edges.values())
+    .filter(edge => !edge.isPruned)
+    .map(getEdgeGml)
+    .join("\n")
+
 console.log(`graph
 [
 	hierarchic	1
 	directed	1
-${Array.from(nodes.values()).map(getNodeGml).join("\n")}${Array.from(edges.values()).map(getEdgeGml).join("\n")}]
+${nodeGml}${edgeGml}]
 `)
