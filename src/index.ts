@@ -2,7 +2,7 @@
 
 import { Command } from 'commander';
 import { execSync } from 'child_process';
-import { exit } from 'process';
+import { exit, chdir, cwd } from 'process';
 const trace = require('debug')("trace");
 const debug = require('debug')("debug");
 const package_json = require("../package.json");
@@ -17,6 +17,7 @@ interface Node {
     type: string;
     isData: boolean;
     isPruned: boolean;
+    modulePath?: string
 }
 
 /** An edge connecting two Nodes, describing a dependency. */
@@ -57,7 +58,7 @@ function getReferences(value: any): string[] {
  * @param label the node's text label
  * @returns the new node
  */
-function createNode(id: number, label: string): Node | null {
+function createNode(id: number, label: string, modulePath?: string): Node | null {
     let type;
     let isData = false;
     const isPruned = false
@@ -79,7 +80,7 @@ function createNode(id: number, label: string): Node | null {
         return null;
     }
 
-    return { id, label, type, isData, isPruned };
+    return { id, label, type, isData, isPruned, modulePath };
 }
 
 /**
@@ -238,10 +239,18 @@ function processCategory(nextId: number, nodes: Map<string, Node>, edges: Array<
     for (const [label, parameters] of new Map<string, any>(Object.entries(categoryObject))) {
         const target = `${category}.${label}`;
         try {
-            if (!nodes.has(target)) {
+            let n = nodes.get(target)
+            if (!n) {
                 const node = createNode(nextId++, target)
-                if (node != null) nodes.set(target, node)
+                if (node != null) {
+                    n = node;
+                    nodes.set(target, node)
+                }
             }
+            if (n) {
+                n.modulePath = parameters.source;
+            }
+
         } catch (e) {
             throw new Error(`Unable to create node for "${target}": ${e.message}`);
         }
@@ -332,10 +341,24 @@ function getNodeGml(node: Node): string {
     let fontSize = 12
     let fontName = "Dialog"
 
+    let subgraph = ""
+
+    if (node.modulePath) {
+        const current: string = cwd();
+        try {
+            chdir(node.modulePath);
+            debug(node.modulePath)
+            subgraph = createGraph();
+        } catch (e) {
+            trace(`ERROR: ${e.message}`)
+        }
+        chdir(current);
+    }
+
     return `	node
 	[
 		id	${node.id}
-		label	"${node.label}"
+        label	""
 		graphics
 		[
 			type	"${type}"
@@ -347,10 +370,11 @@ function getNodeGml(node: Node): string {
 		]
 		LabelGraphics
 		[
-			text	"${node.label}"
+            text	"${node.modulePath ? node.label + "\n" + node.modulePath : node.label}"
 			fontSize	${fontSize}
 			fontName	"${fontName}"
 		]
+        ${subgraph}        
 	]`
 }
 
@@ -382,6 +406,25 @@ function getEdgeGml(edge: Edge): string {
 			model	"free"
 		]
 	]`
+}
+
+function getGraphGml(nodes: Map<string, Node>, edges: Array<Edge>): string {
+    const nodeGml = Array.from(nodes.values())
+        .filter(node => !node.isPruned)
+        .map(getNodeGml)
+        .join("\n")
+
+    const edgeGml = Array.from(edges.values())
+        .filter(edge => !edge.isPruned)
+        .map(getEdgeGml)
+        .join("\n")
+
+    return `graph
+[
+    hierarchic	1
+    directed	1
+${nodeGml}${edgeGml}
+]`;
 }
 
 /**
@@ -459,27 +502,10 @@ function pruneBadNodes(nodes: Map<string, Node>) {
         })
 }
 
-function getGraphGml(nodes: Map<string, Node>, edges: Array<Edge>): string {
-    const nodeGml = Array.from(nodes.values())
-        .filter(node => !node.isPruned)
-        .map(getNodeGml)
-        .join("\n")
-
-    const edgeGml = Array.from(edges.values())
-        .filter(edge => !edge.isPruned)
-        .map(getEdgeGml)
-        .join("\n")
-
-    return `graph
-[
-    hierarchic	1
-    directed	1
-${nodeGml}${edgeGml}
-]`;
-}
-
-function createGraph(tfPath: string, h2jPath: string): string {
-    const json = execSync(`cat ${tfPath}/*.tf | ${h2jPath}`, { encoding: 'utf-8' });
+function createGraph(): string {
+    const cmd = `cat *.tf | ${h2jPath}`;
+    debug(cmd)
+    const json = execSync(cmd, { encoding: 'utf-8' });
     const tfObject = JSON.parse(json);
     let nextId = 0;
     const nodes = new Map<string, Node>();
@@ -500,9 +526,9 @@ function createGraph(tfPath: string, h2jPath: string): string {
             }
         }
     } catch (e) {
-        // console.error("Failed to process input: ", e.message);
-        // exit(1);
-        throw e
+        console.error("Failed to process input: ", e.message);
+        exit(1);
+        // throw e
     }
 
     if (program.getOptionValue("pruneLocals")) {
@@ -529,7 +555,8 @@ program
     .option("-p, --prune-locals", "Collapse edges through local vars so the pass directly to the target")
 
 program.parse(process.argv);
-
-const graph = createGraph(program.processedArgs[0], program.getOptionValue("hcl2jsonPath"))
+const h2jPath = program.getOptionValue("hcl2jsonPath");
+chdir(program.processedArgs[0]);
+const graph = createGraph()
 
 console.log(graph)
