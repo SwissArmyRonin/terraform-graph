@@ -573,9 +573,9 @@ function createGraph(): string {
 			}
 		}
 	} catch (e) {
-		// console.error("Failed to process input: ", e.message);
-		// exit(1);
-		throw e;
+		console.error("Failed to process input: ", e.message);
+		exit(1);
+		// throw e;
 	}
 
 	if (program.getOptionValue("pruneLocals")) {
