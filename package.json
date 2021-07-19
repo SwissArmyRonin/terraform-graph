@@ -4,8 +4,8 @@
   "description": "Make graphs of Terraform modules.",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc;./shebangify.js dist/index.js; chmod +x dist/index.js",
-    "watch": "tsc-watch --onSuccess './shebangify.js dist/index.js && chmod +x dist/index.js'",
+    "build": "tsc;./shebangify.js dist/index.js",
+    "watch": "tsc-watch --onSuccess './shebangify.js dist/index.js'",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
