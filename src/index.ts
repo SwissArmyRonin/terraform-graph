@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { execSync } from 'child_process';
 import { exit } from 'process';
+const trace = require('debug')("trace");
 const debug = require('debug')("debug");
 const package_json = require("../package.json");
 
@@ -42,7 +43,6 @@ function getReferences(value: any): string[] {
 
     const matches = new Array<string>();
 
-    debug(valueBlob)
     // This is a hack to ignore strings that _definitely_ don't contain references,
     if (!valueBlob.includes("${")) return [];
 
@@ -56,8 +56,8 @@ function getReferences(value: any): string[] {
  * Construct a node and add it to the global node map.
  * @param label the node's text label
  */
-function createNodeIfNotExists(label: string) {
-    if (nodes.has(label)) return;
+function createNodeIfNotExists(label: string): Node | undefined {
+    if (nodes.has(label)) return nodes.get(label);
 
     let type;
     let isData = false;
@@ -76,7 +76,7 @@ function createNodeIfNotExists(label: string) {
 
     if (type == "count") {
         // Skip references to the count variable
-        return;
+        return undefined;
     }
 
     const node: Node = {
@@ -88,6 +88,7 @@ function createNodeIfNotExists(label: string) {
     }
 
     nodes.set(label, node)
+    return node;
 }
 
 /**
@@ -119,7 +120,6 @@ function createEdge(source: string, label: string, target: string, direct: boole
     }
 
     edges.push(edge);
-
 }
 
 
@@ -132,7 +132,12 @@ function processNestedResourceCategory(categoryObject: any, prefix: string = "")
     for (const [dataType, dataInstance] of new Map<string, any>(Object.entries(categoryObject))) {
         for (const [label, parameters] of new Map<string, any>(Object.entries(dataInstance))) {
             const target = `${prefix}${dataType}.${label}`;
-            try { createNodeIfNotExists(target); } catch (e) { throw new Error(`Unable to create node for "${target}": ${e.message}`); }
+            try {
+                const node = createNodeIfNotExists(target);
+                if (node) {
+                    node.type = "resource";
+                }
+            } catch (e) { throw new Error(`Unable to create node for "${target}": ${e.message}`); }
             for (const [key, value] of Object.entries(parameters)) {
                 const matches = getReferences(value);
                 matches.forEach(source => {
@@ -288,19 +293,37 @@ function getEdgeGml(edge: Edge): string {
 	]`
 }
 
-/** If multiple edges connect the same node, join them into one edge. */
-function joinEdges() {
-    throw new Error('Function not implemented.');
+/**
+ * If multiple edges connect the same node, join them into one edge.
+ * @param edges a list of edges
+ */
+function joinEdges(edges: Array<Edge>) {
+    const edgeCache = new Map<string, Edge>();
+    edges
+        .filter(edge => !edge.isPruned)
+        .forEach(edge => {
+            const key = `${edge.source.id}->${edge.target.id}`
+            if (edgeCache.has(key)) {
+                trace("Pruned", edge)
+                const e = (edgeCache.get(key) as Edge);
+                e.isDirect = false;
+                // e.label = `${e.label}, ${edge.label}`;
+                e.label = '<multiple joined edges>'
+                edge.isPruned = true
+            } else {
+                edgeCache.set(key, edge);
+            }
+        })
 }
 
 /**
- * Recursively remove local nodes and route their dependencies to nodes that depended on the local.
+ * Recursively remove local nodes and route their dependencies to nodes that depended on the local. 
+ * @param nodes a map of labels to nodes
  */
-function pruneLocals() {
+function pruneLocals(nodes: Map<string, Node>) {
     Array.from(nodes.values())
         .filter(node => node.type == "local")
         .forEach(node => {
-            debug("local:", node.label)
             node.isPruned = true
             edges
                 .filter(inbound => inbound.target == node)
@@ -317,6 +340,40 @@ function pruneLocals() {
                 })
 
         })
+}
+
+/**
+ * Prune nodes with the resource type were created by mistake.
+ * @param nodes a map of labels to nodes
+ */
+function pruneBadNodes(nodes: Map<string, Node>) {
+    const whitelist = ['data', 'local', 'module', 'output', 'var', 'resource'];
+    tfObject.resource
+    Array.from(nodes.values())
+        .filter(node => !whitelist.includes(node.type))
+        .forEach(node => {
+            trace("Pruned", node.label)
+            node.isPruned = true
+        })
+}
+
+function getGraphGml(nodes: Map<string, Node>, edges: Array<Edge>): any {
+    const nodeGml = Array.from(nodes.values())
+        .filter(node => !node.isPruned)
+        .map(getNodeGml)
+        .join("\n")
+
+    const edgeGml = Array.from(edges.values())
+        .filter(edge => !edge.isPruned)
+        .map(getEdgeGml)
+        .join("\n")
+
+    return `graph
+[
+    hierarchic	1
+    directed	1
+${nodeGml}${edgeGml}
+]`;
 }
 
 // ========================================= MAIN ==================================================
@@ -357,26 +414,15 @@ try {
 }
 
 if (program.getOptionValue("pruneLocals")) {
-    pruneLocals();
+    pruneLocals(nodes);
 }
 
 if (program.getOptionValue("joinEdges")) {
-    joinEdges();
+    joinEdges(edges);
 }
 
-const nodeGml = Array.from(nodes.values())
-    .filter(node => !node.isPruned)
-    .map(getNodeGml)
-    .join("\n")
+pruneBadNodes(nodes);
 
-const edgeGml = Array.from(edges.values())
-    .filter(edge => !edge.isPruned)
-    .map(getEdgeGml)
-    .join("\n")
+const graph = getGraphGml(nodes, edges);
 
-console.log(`graph
-[
-	hierarchic	1
-	directed	1
-${nodeGml}${edgeGml}]
-`)
+console.log(graph)
