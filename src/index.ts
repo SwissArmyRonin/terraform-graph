@@ -3,6 +3,8 @@
 import { Command } from "commander";
 import { execSync } from "child_process";
 import { exit, chdir, cwd } from "process";
+import { readFileSync } from "fs";
+import path from "path";
 const debug = require("debug")("debug");
 const package_json = require("../package.json");
 
@@ -105,12 +107,6 @@ function createEdge(
 	if (!source || !target) {
 		return null;
 	}
-
-	const parts = source.label.split(".");
-	// if (parts.length == 2 && parts[0] == "count") {
-	// 	// Skip references to the count variable
-	// 	return null;
-	// }
 
 	const edge = {
 		id,
@@ -294,7 +290,12 @@ function processCategory(
 				}
 			}
 			if (n) {
-				n.modulePath = parameters.source;
+				if (sourceMap.has(parameters.source)) {
+					n.modulePath = sourceMap.get(parameters.source);
+					debug(`Mapping ${parameters.source} to ${n.modulePath}`);
+				} else {
+					n.modulePath = parameters.source;
+				}
 			}
 		} catch (e) {
 			throw new Error(`Unable to create node for "${target}": ${e.message}`);
@@ -400,7 +401,9 @@ function getNodeGml(node: Node): string {
 		try {
 			chdir(node.modulePath);
 			subgraph = createGraph();
-		} catch (e) {}
+		} catch (e) {
+			console.error("Unable to find " + node.modulePath + ". " + e.message);
+		}
 		chdir(current);
 	}
 
@@ -535,8 +538,15 @@ function pruneLocals(nextId: number, nodes: Map<string, Node>, edges: Array<Edge
 }
 
 function createGraph(): string {
-	const cmd = `cat *.tf | ${h2jPath}`;
-	const json = execSync(cmd, { encoding: "utf-8" });
+	const cmd = `for f in *.tf; do (cat "\${f}"; echo); done | ${h2jPath}`;
+
+	let json;
+	try {
+		json = execSync(cmd, { encoding: "utf-8" });
+	} catch (e) {
+		e.message += `[CWD:${cwd()}]`;
+		throw e;
+	}
 	const tfObject = JSON.parse(json);
 	let nextId = 0;
 	const nodes = new Map<string, Node>();
@@ -575,7 +585,6 @@ function createGraph(): string {
 	} catch (e) {
 		console.error("Failed to process input: ", e.message);
 		exit(1);
-		// throw e;
 	}
 
 	if (program.getOptionValue("pruneLocals")) {
@@ -614,6 +623,10 @@ program
 		"If there are multiple edges from one resource to another, joint them into one"
 	)
 	.option(
+		"-m, --use-module-json",
+		'Use the the cache manifest in ".terraform/modules/modules.json". Requires a prior "terraform init" run'
+	)
+	.option(
 		"-p, --prune-locals",
 		"Collapse edges through local vars so the pass directly to the target"
 	);
@@ -621,6 +634,25 @@ program
 program.parse(process.argv);
 const h2jPath = program.getOptionValue("hcl2jsonPath");
 chdir(program.processedArgs[0]);
+
+let sourceMap = new Map<string, string>();
+if (program.getOptionValue("useModuleJson")) {
+	try {
+		const json = readFileSync(".terraform/modules/modules.json");
+		const moduleCache = JSON.parse(json.toString());
+		Array.from(moduleCache.Modules)
+			.filter((e: any) => (e.Source as string).startsWith("git"))
+			.forEach((e: any) => {
+				sourceMap.set(e.Source, path.resolve(e.Dir));
+			});
+	} catch (e) {
+		console.error(
+			'Can\'t read ".terraform/modules/modules.json". Did you forget to run "terraform init"?'
+		);
+		exit(1);
+	}
+}
+
 const graph = createGraph();
 
 console.log(graph);
