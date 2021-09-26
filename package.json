@@ -1,9 +1,11 @@
 {
   "name": "@swissarmyronin/terraform-graph",
-  "version": "2.2.1",
-  "description": "Make graphs of Terraform modules.",
-  "main": "index.js",
+  "version": "3.0.0",
+  "description": "Make graphs of Terraform modules",
+  "main": "dist/index.js",
   "scripts": {
+    "build": "tsc;./shebangify.js dist/index.js",
+    "watch": "tsc-watch --onSuccess './shebangify.js dist/index.js'",
     "test": "echo \"All the tests are green. Trust me :)\" && exit 0"
   },
   "bugs": {
@@ -17,17 +19,16 @@
   "author": "Mads Hvelplund <mads@swissarmyronin.dk>",
   "license": "MIT",
   "dependencies": {
-    "commander": "^6.2.0",
-    "debug": "^4.2.0"
+    "commander": "^8.0.0",
+    "debug": "^4.3.2"
   },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com/"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/SwissArmyRonin/terraform-graph.git"
+  "devDependencies": {
+    "@tsconfig/node14": "^1.0.1",
+    "@types/node": "^16.3.1",
+    "tsc-watch": "^4.4.0",
+    "typescript": "^4.3.5"
   },
   "bin": {
-    "terraform-graph": "./index.js"
+    "terraform-graph": "./dist/index.js"
   }
 }
