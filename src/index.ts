@@ -153,10 +153,10 @@ function processNestedResourceCategory(
 					if (n) {
 						n.type = "resource";
 					}
-				} catch (e) {
+				} catch (e: any) {
 					throw new Error(`Unable to create node for "${target}": ${e.message}`);
 				}
-			} catch (e) {
+			} catch (e: any) {
 				throw new Error(`Unable to create node for "${target}": ${e.message}`);
 			}
 			for (const [key, value] of Object.entries(parameters)) {
@@ -167,7 +167,7 @@ function processNestedResourceCategory(
 							const node = createNode(nextId++, source);
 							if (node != null) nodes.set(source, node);
 						}
-					} catch (e) {
+					} catch (e: any) {
 						throw new Error(`Unable to create node for "${source}": ${e.message}`);
 					}
 					try {
@@ -179,7 +179,7 @@ function processNestedResourceCategory(
 							matches.length == 1
 						);
 						if (edge != null) edges.push(edge);
-					} catch (e) {
+					} catch (e: any) {
 						throw new Error(
 							`Unable to create edge for "${source}" [${nodes.get(
 								source
@@ -223,7 +223,7 @@ function processLocalsCategory(
 				const node = createNode(nextId++, target);
 				if (node != null) nodes.set(target, node);
 			}
-		} catch (e) {
+		} catch (e: any) {
 			throw new Error(`Unable to create node for "${target}": ${e.message}`);
 		}
 
@@ -234,7 +234,7 @@ function processLocalsCategory(
 					const node = createNode(nextId++, source);
 					if (node != null) nodes.set(source, node);
 				}
-			} catch (e) {
+			} catch (e: any) {
 				throw new Error(`Unable to create node for "${source}": ${e.message}`);
 			}
 			try {
@@ -246,7 +246,7 @@ function processLocalsCategory(
 					matches.length == 1
 				);
 				if (edge != null) edges.push(edge);
-			} catch (e) {
+			} catch (e: any) {
 				throw new Error(
 					`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`
 				);
@@ -297,7 +297,7 @@ function processCategory(
 					n.modulePath = parameters.source;
 				}
 			}
-		} catch (e) {
+		} catch (e: any) {
 			throw new Error(`Unable to create node for "${target}": ${e.message}`);
 		}
 		for (const [key, value] of Object.entries(parameters)) {
@@ -309,7 +309,7 @@ function processCategory(
 							const node = createNode(nextId++, source);
 							if (node != null) nodes.set(source, node);
 						}
-					} catch (e) {
+					} catch (e: any) {
 						throw new Error(`Unable to create node for "${source}": ${e.message}`);
 					}
 					try {
@@ -321,7 +321,7 @@ function processCategory(
 							matches.length == 1
 						);
 						if (edge != null) edges.push(edge);
-					} catch (e) {
+					} catch (e: any) {
 						throw new Error(
 							`Unable to create edge for "${source}" ("${key}") "${target}": ${e.message}`
 						);
@@ -401,7 +401,7 @@ function getNodeGml(node: Node): string {
 		try {
 			chdir(node.modulePath);
 			subgraph = createGraph();
-		} catch (e) {
+		} catch (e: any) {
 			console.error("Unable to find " + node.modulePath + ". " + e.message);
 		}
 		chdir(current);
@@ -426,7 +426,7 @@ function getNodeGml(node: Node): string {
 			fontSize	${fontSize}
 			fontName	"${fontName}"
 		]
-        ${subgraph}        
+        ${subgraph}
 	]`;
 }
 
@@ -543,7 +543,7 @@ function createGraph(): string {
 	let json;
 	try {
 		json = execSync(cmd, { encoding: "utf-8" });
-	} catch (e) {
+	} catch (e: any) {
 		e.message += `[CWD:${cwd()}]`;
 		throw e;
 	}
@@ -582,7 +582,7 @@ function createGraph(): string {
 					break;
 			}
 		}
-	} catch (e) {
+	} catch (e: any) {
 		console.error("Failed to process input: ", e.message);
 		exit(1);
 	}
@@ -645,7 +645,7 @@ if (program.getOptionValue("useModuleJson")) {
 			.forEach((e: any) => {
 				sourceMap.set(e.Source, path.resolve(e.Dir));
 			});
-	} catch (e) {
+	} catch (e: any) {
 		console.error(
 			'Can\'t read ".terraform/modules/modules.json". Did you forget to run "terraform init"?'
 		);
