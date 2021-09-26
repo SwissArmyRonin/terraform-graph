@@ -2,7 +2,18 @@
 
 Graph module dependencies to GML files.
 
-This module requires [hcl2json](https://github.com/abiosoft/hcl2json).
+## Installation
+
+Install [hcl2json](https://github.com/abiosoft/hcl2json).
+
+Next, run:
+```shell
+npm i
+npm run build
+npm link
+```
+
+Now `terraform-graph` should be available in your `PATH`.
 
 ## Usage
 
